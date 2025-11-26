@@ -1,4 +1,4 @@
-package com.github.xepozz.callplugin
+package com.github.xepozz.call
 
 import com.intellij.DynamicBundle
 import org.jetbrains.annotations.NonNls
