@@ -1,5 +1,6 @@
 package com.github.xepozz.call.handlers
 
+import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.ui.ConsoleView
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.project.Project
@@ -20,5 +21,5 @@ interface ExecutionHandler {
         return matches
     }
 
-    fun execute(value: String, console: ConsoleView, disposable: Disposable, project: Project)
+    fun execute(value: String, console: ConsoleView, disposable: Disposable, project: Project, onProcessCreated: (ProcessHandler?) -> Unit = {})
 }

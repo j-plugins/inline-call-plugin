@@ -2,6 +2,7 @@ package com.github.xepozz.call.handlers
 
 import com.intellij.execution.configurations.GeneralCommandLine
 import com.intellij.execution.process.OSProcessHandler
+import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.process.ProcessTerminatedListener
 import com.intellij.execution.ui.ConsoleView
 import com.intellij.execution.ui.ConsoleViewContentType
@@ -24,9 +25,9 @@ class ShellExecutionHandler : ExecutionInlayProvider(), ExecutionHandler {
 
     override fun getHandler() = this
 
-    override fun execute(value: String, console: ConsoleView, disposable: Disposable, project: Project) {
-        console.print("$ $value\n", ConsoleViewContentType.SYSTEM_OUTPUT)
-
+    override fun execute(value: String, console: ConsoleView, disposable: Disposable, project: Project,
+                         onProcessCreated: (ProcessHandler?) -> Unit
+    ) {
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Executing", true) {
             override fun run(indicator: ProgressIndicator) {
                 try {
@@ -39,13 +40,16 @@ class ShellExecutionHandler : ExecutionInlayProvider(), ExecutionHandler {
                     invokeLater {
                         if (!Disposer.isDisposed(disposable)) {
                             console.attachToProcess(processHandler)
+                            onProcessCreated(processHandler)
                             processHandler.startNotify()
                         }
                     }
 
                 } catch (e: Exception) {
                     invokeLater {
+                        onProcessCreated(null)
                         if (!Disposer.isDisposed(disposable)) {
+
                             console.print("\n[Error: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
                         }
                     }

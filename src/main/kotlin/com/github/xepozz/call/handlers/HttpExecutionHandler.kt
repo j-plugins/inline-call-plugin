@@ -1,5 +1,6 @@
 package com.github.xepozz.call.handlers
 
+import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.ui.ConsoleView
 import com.intellij.execution.ui.ConsoleViewContentType
 import com.intellij.icons.AllIcons
@@ -31,9 +32,12 @@ class HttpExecutionHandler : ExecutionInlayProvider(), ExecutionHandler {
 
     override fun getHandler() = this
 
-    override fun execute(value: String, console: ConsoleView, disposable: Disposable, project: Project) {
+    override fun execute(value: String, console: ConsoleView, disposable: Disposable, project: Project,
+                         onProcessCreated: (ProcessHandler?) -> Unit
+    ) {
         console.print("GET $value\n", ConsoleViewContentType.SYSTEM_OUTPUT)
         console.print("Connecting...\n\n", ConsoleViewContentType.LOG_INFO_OUTPUT)
+        onProcessCreated(null)
 
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Fetching", true) {
             override fun run(indicator: ProgressIndicator) {
