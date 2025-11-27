@@ -10,11 +10,20 @@ import com.intellij.codeInsight.hints.presentation.MouseButton
 import com.intellij.codeInsight.hints.presentation.PresentationFactory
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.ui.popup.JBPopupFactory
+import com.intellij.openapi.application.invokeLater
+import com.intellij.openapi.editor.ex.EditorEx
+import com.intellij.openapi.editor.impl.EditorEmbeddedComponentManager
+import com.intellij.ui.JBColor
+import com.intellij.util.ui.JBUI
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
 import java.awt.Cursor
+import java.awt.BorderLayout
 import javax.swing.Icon
+import javax.swing.JComponent
+import javax.swing.JPanel
+import javax.swing.BorderFactory
+import java.awt.Dimension
 
 /**
  * Unified InlayHintsProvider that uses the new extensible mechanism:
@@ -103,24 +112,47 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                 val wrapper = WrapperFactory.EP_NAME.extensionList.firstOrNull { it.supports(feature.id) }?.create(match)
                     ?: return@onClick
 
-                // Show wrapper component in a popup near the editor as a primary container for results
+                // Embed wrapper component directly into the editor near the match position
                 try {
-                    val popup = JBPopupFactory.getInstance()
-                        .createComponentPopupBuilder(wrapper.component, null)
-                        .setRequestFocus(false)
-                        .setResizable(true)
-                        .setMovable(true)
-                        .setTitle("${feature.tooltipPrefix}")
-                        .createPopup()
-                    // Show near caret/editor best position
-                    popup.showInBestPositionFor(editor)
+                    val start = match.originalRange.startOffset
+                    val line = editor.document.getLineNumber(start)
+                    val lineEndOffset = editor.document.getLineEndOffset(line)
+                    embedIntoEditor(editor, lineEndOffset, wrapper.component)
                 } catch (_: Throwable) {
-                    // Fallback: ignore UI errors, still execute feature
+                    // ignore UI embedding errors, still execute feature
                 }
 
-                // Execute feature; ProcessHandler management may be added later (Phase 2)
+                // Execute feature after showing wrapper
                 feature.execute(match, wrapper, project) { /* ignore */ }
             }
         }
     }
+}
+
+private fun embedIntoEditor(editor: Editor, offset: Int, component: JComponent): JComponent {
+    val wrapper = JPanel(BorderLayout()).apply {
+        border = BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(JBColor.border(), 1),
+            JBUI.Borders.empty(4)
+        )
+        background = JBColor.background()
+        add(component, BorderLayout.CENTER)
+        preferredSize = Dimension(700, 250)
+    }
+
+    val manager = EditorEmbeddedComponentManager.getInstance()
+    val properties = EditorEmbeddedComponentManager.Properties(
+        EditorEmbeddedComponentManager.ResizePolicy.any(),
+        null,
+        true,
+        false,
+        0,
+        offset
+    )
+
+    invokeLater {
+        manager.addComponent(editor as EditorEx, wrapper, properties)
+    }
+
+    return wrapper
 }

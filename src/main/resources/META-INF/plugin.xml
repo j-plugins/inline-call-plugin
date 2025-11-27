@@ -9,18 +9,35 @@
     <resource-bundle>messages.MyBundle</resource-bundle>
 
     <extensions defaultExtensionNs="com.intellij">
+        <!-- New unified inlay provider based on the extensible mechanism -->
         <codeInsight.inlayProvider
                 language="HTML"
-                implementationClass="com.github.xepozz.call.handlers.HttpExecutionHandler"/>
-        <codeInsight.inlayProvider
-                language="HTML"
-                implementationClass="com.github.xepozz.call.handlers.ShellExecutionHandler"/>
+                implementationClass="com.github.xepozz.call.implementation.inlay.ExecutionInlayProvider"/>
+    </extensions>
 
-        <configurationType implementation="com.github.xepozz.call.shell.run.ShellRunConfigurationType"/>
-        <runConfigurationProducer implementation="com.github.xepozz.call.shell.run.ShellRunConfigurationProducer"/>
+    <extensionPoints>
+        <extensionPoint
+                dynamic="true"
+                interface="com.github.xepozz.call.elements.ExecutionElementsProvider"
+                name="executionElementsProvider"/>
 
-        <configurationType implementation="com.github.xepozz.call.http.run.HttpRunConfigurationType"/>
-        <runConfigurationProducer implementation="com.github.xepozz.call.http.run.HttpRunConfigurationProducer"/>
+        <extensionPoint
+                dynamic="true"
+                interface="com.github.xepozz.call.implementation.api.LanguageTextExtractor"
+                name="languageTextExtractor"/>
+        <extensionPoint
+                dynamic="true"
+                interface="com.github.xepozz.call.implementation.api.FeatureGenerator" name="feature"/>
+        <extensionPoint
+                dynamic="true"
+                interface="com.github.xepozz.call.implementation.api.WrapperFactory" name="wrapperFactory"/>
+    </extensionPoints>
 
+    <extensions defaultExtensionNs="com.github.xepozz.call">
+        <!-- Default implementations for the new architecture (Phase 1) -->
+        <languageTextExtractor implementation="com.github.xepozz.call.implementation.extractors.AdapterLanguageExtractor"/>
+        <feature implementation="com.github.xepozz.call.implementation.features.ShellFeatureAdapter"/>
+        <feature implementation="com.github.xepozz.call.implementation.features.HttpFeatureAdapter"/>
+        <wrapperFactory implementation="com.github.xepozz.call.implementation.wrappers.ConsoleWrapperFactory"/>
     </extensions>
 </idea-plugin>
