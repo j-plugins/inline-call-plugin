@@ -5,6 +5,9 @@
     <vendor>xepozz</vendor>
 
     <depends>com.intellij.modules.platform</depends>
+    <!-- Optional Kotlin dependency: used only to register Kotlin-specific extensions in kotlin.xml -->
+    <depends optional="true" config-file="language-kotlin.xml">org.jetbrains.kotlin</depends>
+    <depends optional="true" config-file="language-xml.xml">com.intellij.modules.xml</depends>
 
     <resource-bundle>messages.MyBundle</resource-bundle>
 
@@ -16,11 +19,6 @@
     </extensions>
 
     <extensionPoints>
-        <extensionPoint
-                dynamic="true"
-                interface="com.github.xepozz.call.elements.ExecutionElementsProvider"
-                name="executionElementsProvider"/>
-
         <extensionPoint
                 dynamic="true"
                 interface="com.github.xepozz.call.implementation.api.LanguageTextExtractor"
@@ -35,7 +33,9 @@
 
     <extensions defaultExtensionNs="com.github.xepozz.call">
         <!-- Default implementations for the new architecture (Phase 1) -->
-        <languageTextExtractor implementation="com.github.xepozz.call.implementation.extractors.AdapterLanguageExtractor"/>
+        <languageTextExtractor
+                order="last"
+                implementation="com.github.xepozz.call.implementation.extractors.AdapterLanguageExtractor"/>
         <feature implementation="com.github.xepozz.call.implementation.features.ShellFeatureAdapter"/>
         <feature implementation="com.github.xepozz.call.implementation.features.HttpFeatureAdapter"/>
         <wrapperFactory implementation="com.github.xepozz.call.implementation.wrappers.ConsoleWrapperFactory"/>

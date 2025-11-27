@@ -50,6 +50,8 @@ interface LanguageTextExtractor {
     companion object {
         val EP_NAME: ExtensionPointName<LanguageTextExtractor> =
             ExtensionPointName.create("com.github.xepozz.call.languageTextExtractor")
+
+        fun getApplicable(file:PsiFile): List<LanguageTextExtractor> = EP_NAME.extensionList.filter { it.isApplicable(file) }
     }
 }
 

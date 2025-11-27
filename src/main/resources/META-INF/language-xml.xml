@@ -1,0 +1,7 @@
+<idea-plugin>
+    <extensions defaultExtensionNs="com.github.xepozz.call">
+        <languageTextExtractor
+                order="last"
+                implementation="com.github.xepozz.call.language.xml.XmlLanguageExtractor"/>
+    </extensions>
+</idea-plugin>

@@ -26,6 +26,7 @@ import com.intellij.openapi.editor.impl.EditorEmbeddedComponentManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.openapi.util.Disposer
+import com.intellij.psi.PsiComment
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
 import com.intellij.ui.JBColor
@@ -38,8 +39,6 @@ import javax.swing.BorderFactory
 import javax.swing.Icon
 import javax.swing.JComponent
 import javax.swing.JPanel
-import com.github.xepozz.call.elements.ExecutionElementsProvider
-import com.github.xepozz.call.elements.DefaultCommentElementsProvider
 
 @Suppress("UnstableApiUsage")
 abstract class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
@@ -65,14 +64,10 @@ abstract class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
         settings: NoSettings,
         sink: InlayHintsSink
     ) = object : FactoryInlayHintsCollector(editor) {
-        // Choose elements provider per file once per collector instance
-        private val elementsProvider: ExecutionElementsProvider =
-            ExecutionElementsProvider.EP_NAME.extensionList.firstOrNull { it.isApplicable(file) }
-                ?: DefaultCommentElementsProvider
 
         override fun collect(element: PsiElement, editor: Editor, sink: InlayHintsSink): Boolean {
-            // Ask provider whether this element is suitable; fallback provider uses PsiComment
-            if (!elementsProvider.isSuitable(element)) return true
+            // Legacy provider: work only with PsiComment elements
+            if (element !is PsiComment) return true
 
             val text = element.text
             val project = element.project

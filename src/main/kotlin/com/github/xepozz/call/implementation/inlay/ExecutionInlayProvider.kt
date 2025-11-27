@@ -87,8 +87,13 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
 
         private fun computeMatches(file: PsiFile): Map<PsiElement, List<FeatureMatch>> {
             val project = file.project
-            val extractors = LanguageTextExtractor.EP_NAME.extensionList.filter { it.isApplicable(file) }
-            if (extractors.isEmpty()) return emptyMap()
+            val applicable = LanguageTextExtractor.getApplicable(file)
+            if (applicable.isEmpty()) return emptyMap()
+
+            // Prefer language-specific extractors over the generic fallback (AdapterLanguageExtractor)
+            val specific = applicable.filter { it !is com.github.xepozz.call.implementation.extractors.AdapterLanguageExtractor }
+            val extractors = specific.ifEmpty { applicable }
+            println("file: $file, extractors: ${extractors.map { it.javaClass }}")
 
             val blocks = extractors.flatMap { it.extract(file) }
             if (blocks.isEmpty()) return emptyMap()
