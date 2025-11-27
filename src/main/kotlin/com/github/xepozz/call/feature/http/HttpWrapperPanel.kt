@@ -16,9 +16,10 @@ class HttpWrapperPanel(project: Project) : Wrapper {
     val console: ConsoleView = builder.console
 
     override val component: JComponent = JBTabbedPane(JTabbedPane.TOP).apply {
-        addTab("Body", bodyConsole.component)
-        addTab("Headers", headersConsole.component)
         addTab("Raw", console.component)
+        addTab("Headers", headersConsole.component)
+        addTab("Body", bodyConsole.component)
+//        addTab("Preview", bodyConsole.component)
     }
 
     override fun dispose() {

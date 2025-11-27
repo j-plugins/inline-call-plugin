@@ -199,7 +199,6 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             var current = sessions[key]
             val wrapper = feature.createWrapper()
 
-
             if (current?.container == null) {
                 try {
                     val container = createResultContainer()
