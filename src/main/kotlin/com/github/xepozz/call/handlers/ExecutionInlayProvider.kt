@@ -75,7 +75,7 @@ abstract class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             handler.findMatches(text).forEach { match ->
                 val offset = element.textOffset + match.offset
                 val key = makeKey(editor, element)
-                val data = activeComponents[key]
+                val data = activeComponents.getOrPut(key) { EmbeddedComponentData() }
 
                 val presentation = buildPresentation(handler, match.value, element, editor, project, key, data)
                 sink.addInlineElement(offset, false, presentation, false)
@@ -91,12 +91,11 @@ abstract class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             editor: Editor,
             project: Project,
             key: String,
-            data: EmbeddedComponentData?
+            data: EmbeddedComponentData,
         ): InlayPresentation {
             val presentations = mutableListOf<InlayPresentation>()
 
-            // Кнопка collapse/expand (только если уже запускали)
-            if (data != null) {
+            if (data.state != ExecutionState.IDLE) {
                 val collapseIcon = if (data.collapsed) AllIcons.General.ArrowRight else AllIcons.General.ArrowDown
                 val collapseTooltip = if (data.collapsed) "Expand" else "Collapse"
                 presentations.add(
@@ -105,28 +104,23 @@ abstract class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                     }
                 )
             }
-
-            // Основная кнопка Run/Stop
-            when (data?.state) {
-                ExecutionState.RUNNING -> {
-                    presentations.add(
-                        createIconButton(AllIcons.Actions.Suspend, "Stop") {
-                            stop(key)
-                        }
-                    )
-                }
-                else -> {
-                    // Одна кнопка Run — при клике показывает popup с конфигурациями
-                    presentations.add(
-                        createIconButton(handler.icon, "${handler.tooltipPrefix}: $value") {
-                            showRunPopup(handler, value, comment, editor, project, key)
-                        }
-                    )
-                }
+            if (data.state == ExecutionState.RUNNING) {
+                presentations.add(
+                    createIconButton(AllIcons.Actions.Suspend, "Stop") {
+                        stop(key)
+                    }
+                )
             }
 
-            // Кнопка закрытия (только если есть компонент)
-            if (data != null) {
+            if (data.state == ExecutionState.IDLE || data.state == ExecutionState.FINISHED) {
+                presentations.add(
+                    createIconButton(handler.icon, "${handler.tooltipPrefix}: $value") {
+                        showRunPopup(handler, value, comment, editor, project, key)
+                    }
+                )
+            }
+
+            if (data.state != ExecutionState.IDLE) {
                 presentations.add(
                     createIconButton(AllIcons.Actions.Close, "Close") {
                         close(key)
@@ -158,6 +152,9 @@ abstract class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
 
             // Если нет конфигураций от producers — запускаем напрямую через handler
             if (configurations.isNullOrEmpty()) {
+                return
+            }
+            if (configurations.size == 1) {
                 runDirect(handler, value, element, editor, project, key)
                 return
             }
@@ -167,23 +164,23 @@ abstract class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             val group = DefaultActionGroup()
 
             // Добавляем опцию прямого запуска
-            group.add(object : AnAction("Run Inline", "Run directly in editor", handler.icon) {
-                override fun actionPerformed(e: AnActionEvent) {
-                    runDirect(handler, value, element, editor, project, key)
-                }
-            })
+//            group.add(object : AnAction("Run Inline", "Run directly in editor", handler.icon) {
+//                override fun actionPerformed(e: AnActionEvent) {
+//                    runDirect(handler, value, element, editor, project, key)
+//                }
+//            })
 
             group.addSeparator("Run Configurations")
 
-            // Добавляем конфигурации от producers
-            configurations.forEach { configFromContext ->
-                val config = configFromContext.configuration
-                group.add(object : AnAction(config.name, "Run via ${config.type.displayName}", config.icon) {
-                    override fun actionPerformed(e: AnActionEvent) {
-                        runViaConfiguration(configFromContext.configurationSettings, element, editor, project, key)
-                    }
-                })
-            }
+//            // Добавляем конфигурации от producers
+//            configurations.forEach { configFromContext ->
+//                val config = configFromContext.configuration
+//                group.add(object : AnAction(config.name, "Run via ${config.type.displayName}", config.icon) {
+//                    override fun actionPerformed(e: AnActionEvent) {
+//                        runViaConfiguration(configFromContext.configurationSettings, element, editor, project, key)
+//                    }
+//                })
+//            }
 
             val popup = JBPopupFactory.getInstance()
                 .createActionGroupPopup(
@@ -211,22 +208,21 @@ abstract class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             // Закрываем предыдущий если есть
             close(key)
 
-            val (console, disposable) = createConsole(project)
+            val console = createConsole(project)
             val wrapper = createWrapper(editor, comment, console.component)
 
             val data = EmbeddedComponentData(
                 wrapper = wrapper,
                 console = console,
-                disposable = disposable,
                 state = ExecutionState.RUNNING
             )
             activeComponents[key] = data
 
             // Вызываем handler.execute() — дочерний класс делает работу
-            handler.execute(value, console, disposable, project) { processHandler ->
+            handler.execute(value, console, project) { processHandler ->
                 data.processHandler = processHandler
 
-                processHandler?.addProcessListener(object : com.intellij.execution.process.ProcessAdapter() {
+                processHandler?.addProcessListener(object : com.intellij.execution.process.ProcessListener {
                     override fun processTerminated(event: com.intellij.execution.process.ProcessEvent) {
                         data.state = ExecutionState.FINISHED
                         data.processHandler = null
@@ -251,19 +247,18 @@ abstract class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             // Закрываем предыдущий если есть
             close(key)
 
-            val (console, disposable) = createConsole(project)
+            val console = createConsole(project)
             val wrapper = createWrapper(editor, element, console.component)
 
             val data = EmbeddedComponentData(
                 wrapper = wrapper,
                 console = console,
-                disposable = disposable,
                 state = ExecutionState.RUNNING
             )
             activeComponents[key] = data
 
             // Подписываемся на запуск процесса
-            val connection = project.messageBus.connect(disposable)
+            val connection = project.messageBus.connect(data.disposable)
             connection.subscribe(
                 ExecutionManager.EXECUTION_TOPIC,
                 object : ExecutionListener {
@@ -357,15 +352,13 @@ abstract class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
         return wrapper
     }
 
-    private fun createConsole(project: Project): Pair<ConsoleView, Disposable> {
-        val disposable = Disposer.newDisposable("ExecutionInlay")
+    private fun createConsole(project: Project): ConsoleView {
         val console = TextConsoleBuilderFactory.getInstance()
             .createBuilder(project)
             .apply { setViewer(true) }
             .console
 
-        Disposer.register(disposable, console)
-        return console to disposable
+        return console
     }
 
     private fun stop(key: String) {
@@ -379,7 +372,7 @@ abstract class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
     private fun toggleCollapse(key: String) {
         activeComponents[key]?.let { data ->
             data.collapsed = !data.collapsed
-            data.wrapper.isVisible = !data.collapsed
+            data.wrapper?.isVisible = !data.collapsed
         }
     }
 
@@ -387,7 +380,7 @@ abstract class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
         activeComponents[key]?.let { data ->
             data.processHandler?.destroyProcess()
             invokeLater {
-                data.wrapper.parent?.remove(data.wrapper)
+                data.wrapper?.parent?.remove(data.wrapper)
                 Disposer.dispose(data.disposable)
             }
             activeComponents.remove(key)

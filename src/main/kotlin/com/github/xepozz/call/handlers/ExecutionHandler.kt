@@ -21,5 +21,5 @@ interface ExecutionHandler {
         return matches
     }
 
-    fun execute(value: String, console: ConsoleView, disposable: Disposable, project: Project, onProcessCreated: (ProcessHandler?) -> Unit = {})
+    fun execute(value: String, console: ConsoleView, project: Project, onProcessCreated: (ProcessHandler?) -> Unit = {})
 }

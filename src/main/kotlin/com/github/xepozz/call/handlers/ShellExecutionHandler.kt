@@ -25,8 +25,11 @@ class ShellExecutionHandler : ExecutionInlayProvider(), ExecutionHandler {
 
     override fun getHandler() = this
 
-    override fun execute(value: String, console: ConsoleView, disposable: Disposable, project: Project,
-                         onProcessCreated: (ProcessHandler?) -> Unit
+    override fun execute(
+        value: String,
+        console: ConsoleView,
+        project: Project,
+        onProcessCreated: (ProcessHandler?) -> Unit,
     ) {
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Executing", true) {
             override fun run(indicator: ProgressIndicator) {
@@ -38,20 +41,19 @@ class ShellExecutionHandler : ExecutionInlayProvider(), ExecutionHandler {
                     ProcessTerminatedListener.attach(processHandler)
 
                     invokeLater {
-                        if (!Disposer.isDisposed(disposable)) {
-                            console.attachToProcess(processHandler)
-                            onProcessCreated(processHandler)
-                            processHandler.startNotify()
-                        }
+//                        if (!Disposer.isDisposed(disposable)) {
+                        console.attachToProcess(processHandler)
+                        onProcessCreated(processHandler)
+                        processHandler.startNotify()
+//                        }
                     }
 
                 } catch (e: Exception) {
                     invokeLater {
                         onProcessCreated(null)
-                        if (!Disposer.isDisposed(disposable)) {
-
-                            console.print("\n[Error: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
-                        }
+//                        if (!Disposer.isDisposed(disposable)) {
+                        console.print("\n[Error: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
+//                        }
                     }
                 }
             }

@@ -32,8 +32,11 @@ class HttpExecutionHandler : ExecutionInlayProvider(), ExecutionHandler {
 
     override fun getHandler() = this
 
-    override fun execute(value: String, console: ConsoleView, disposable: Disposable, project: Project,
-                         onProcessCreated: (ProcessHandler?) -> Unit
+    override fun execute(
+        value: String,
+        console: ConsoleView,
+        project: Project,
+        onProcessCreated: (ProcessHandler?) -> Unit,
     ) {
         console.print("GET $value\n", ConsoleViewContentType.SYSTEM_OUTPUT)
         console.print("Connecting...\n\n", ConsoleViewContentType.LOG_INFO_OUTPUT)
@@ -51,15 +54,15 @@ class HttpExecutionHandler : ExecutionInlayProvider(), ExecutionHandler {
                     val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
 
                     invokeLater {
-                        if (!Disposer.isDisposed(disposable)) {
-                            printResponse(console, response)
-                        }
+//                        if (!Disposer.isDisposed(disposable)) {
+                        printResponse(console, response)
+//                        }
                     }
                 } catch (e: Exception) {
                     invokeLater {
-                        if (!Disposer.isDisposed(disposable)) {
-                            console.print("[Error: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
-                        }
+//                        if (!Disposer.isDisposed(disposable)) {
+                        console.print("[Error: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
+//                        }
                     }
                 }
             }

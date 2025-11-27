@@ -17,11 +17,9 @@
                 implementationClass="com.github.xepozz.call.handlers.ShellExecutionHandler"/>
 
         <configurationType implementation="com.github.xepozz.call.shell.run.ShellRunConfigurationType"/>
-        <runLineMarkerContributor language="" implementationClass="com.github.xepozz.call.shell.run.ShellRunLineMarkerProvider"/>
         <runConfigurationProducer implementation="com.github.xepozz.call.shell.run.ShellRunConfigurationProducer"/>
 
         <configurationType implementation="com.github.xepozz.call.http.run.HttpRunConfigurationType"/>
-        <runLineMarkerContributor language="" implementationClass="com.github.xepozz.call.http.run.HttpRunLineMarkerProvider"/>
         <runConfigurationProducer implementation="com.github.xepozz.call.http.run.HttpRunConfigurationProducer"/>
 
     </extensions>
