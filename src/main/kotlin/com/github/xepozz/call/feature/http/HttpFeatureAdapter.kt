@@ -10,9 +10,6 @@ import com.intellij.execution.ui.ConsoleView
 import com.intellij.execution.ui.ConsoleViewContentType
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.application.invokeLater
-import com.intellij.openapi.progress.ProgressIndicator
-import com.intellij.openapi.progress.ProgressManager
-import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.TextRange
 import java.net.URI
@@ -20,6 +17,8 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Duration
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
 import javax.swing.Icon
 
@@ -63,33 +62,61 @@ class HttpFeatureAdapter : FeatureGenerator, ExecutionHandler {
         val console = wrapper.console
         console.print("GET $value\n", ConsoleViewContentType.SYSTEM_OUTPUT)
         console.print("Connecting...\n\n", ConsoleViewContentType.LOG_INFO_OUTPUT)
-        onProcessCreated(null)
+        // Build request
+        val request = HttpRequest.newBuilder()
+            .uri(URI.create(value))
+            .timeout(Duration.ofSeconds(30))
+            .GET()
+            .build()
 
-        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Fetching", true) {
-            override fun run(indicator: ProgressIndicator) {
-                try {
-                    val request = HttpRequest.newBuilder()
-                        .uri(URI.create(value))
-                        .timeout(Duration.ofSeconds(30))
-                        .GET()
-                        .build()
+        // Create lightweight ProcessHandler to drive UI state transitions
+        var future: CompletableFuture<HttpResponse<String>>? = null
+        val terminated = AtomicBoolean(false)
+        val handler = object : ProcessHandler() {
+            override fun detachIsDefault(): Boolean = false
+            override fun getProcessInput() = null
 
-                    val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
-
-                    invokeLater {
-//                        if (!Disposer.isDisposed(disposable)) {
-                        printResponse(console, response)
-//                        }
-                    }
-                } catch (e: Exception) {
-                    invokeLater {
-//                        if (!Disposer.isDisposed(disposable)) {
-                        console.print("[Error: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
-//                        }
-                    }
+            override fun destroyProcessImpl() {
+                // Cancel ongoing request if any
+                if (terminated.compareAndSet(false, true)) {
+                    future?.cancel(true)
+                    notifyProcessTerminated(0)
                 }
             }
-        })
+
+            override fun detachProcessImpl() {
+                if (terminated.compareAndSet(false, true)) {
+                    future?.cancel(true)
+                    notifyProcessDetached()
+                }
+            }
+
+            // Expose safe termination method to outer scope
+            fun complete(exitCode: Int) {
+                if (terminated.compareAndSet(false, true)) {
+                    notifyProcessTerminated(exitCode)
+                }
+            }
+        }
+
+        onProcessCreated(handler)
+        handler.startNotify()
+
+        // Execute asynchronously; on completion signal process termination
+        future = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+            .whenComplete { response, throwable ->
+                if (throwable != null) {
+                    invokeLater {
+                        console.print("[Error: ${throwable.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
+                    }
+                    handler.complete(-1)
+                } else if (response != null) {
+                    invokeLater {
+                        printResponse(console, response)
+                    }
+                    handler.complete(0)
+                }
+            }
     }
 
     private fun printResponse(console: ConsoleView, response: HttpResponse<String>) {
