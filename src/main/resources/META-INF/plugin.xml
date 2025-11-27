@@ -39,5 +39,6 @@
         <feature implementation="com.github.xepozz.call.feature.shell.ShellFeatureAdapter"/>
         <feature implementation="com.github.xepozz.call.feature.http.HttpFeatureAdapter"/>
         <wrapperFactory implementation="com.github.xepozz.call.base.wrappers.ConsoleWrapperFactory"/>
+        <wrapperFactory implementation="com.github.xepozz.call.base.wrappers.ToolbarWrapperFactory"/>
     </extensions>
 </idea-plugin>

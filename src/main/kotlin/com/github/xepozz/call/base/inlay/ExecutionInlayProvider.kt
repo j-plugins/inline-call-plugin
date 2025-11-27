@@ -24,10 +24,17 @@ import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.process.ProcessListener
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.Disposable
+import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.openapi.actionSystem.ActionToolbar
+import com.intellij.openapi.actionSystem.AnAction
+import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.openapi.actionSystem.toolbarLayout.ToolbarLayoutStrategy
 import com.intellij.openapi.application.invokeLater
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.ex.EditorEx
 import com.intellij.openapi.editor.impl.EditorEmbeddedComponentManager
+import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
 import com.intellij.psi.PsiElement
@@ -38,10 +45,14 @@ import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
 import java.awt.Cursor
 import java.awt.Dimension
+import java.awt.FlowLayout
+import java.awt.datatransfer.StringSelection
 import java.util.concurrent.ConcurrentHashMap
 import javax.swing.BorderFactory
 import javax.swing.Icon
 import javax.swing.JPanel
+import javax.swing.OverlayLayout
+import javax.swing.SwingConstants
 
 /**
  * Unified InlayHintsProvider that uses the new extensible mechanism:
@@ -226,12 +237,14 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
         ) {
             // Ensure wrapper exists and mounted
             var current = sessions[key]
-            val wrapper = WrapperFactory.EP_NAME.extensionList.firstOrNull { it.supports(feature.id) }?.create(match)
+            val wrapper = WrapperFactory.getApplicable(feature).firstOrNull()?.create(match)
                 ?: return
+
 
             if (current?.container == null) {
                 try {
-                    val container = embedContainerIntoEditor(editor, lineEndOffset)
+                    val container = createResultContainer()
+                    embedContainerIntoEditor(editor, container, lineEndOffset)
                     mountWrapperIntoContainer(container, wrapper)
 
                     current = Session(container, wrapper)
@@ -246,6 +259,9 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                 // Replace previous wrapper in the existing container
                 val container = current.container
                 val oldWrapper = current.wrapper
+                if (oldWrapper!=null) {
+                    container.remove(oldWrapper.component)
+                }
                 mountWrapperIntoContainer(container, wrapper)
                 try { oldWrapper?.dispose() } catch (_: Throwable) {}
                 current.wrapper = wrapper
@@ -271,7 +287,6 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
 
         private fun mountWrapperIntoContainer(container: JPanel, wrapper: Wrapper) {
             invokeLater {
-                container.removeAll()
                 container.add(wrapper.component, BorderLayout.CENTER)
                 container.revalidate()
                 container.repaint()
@@ -312,16 +327,38 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
     }
 }
 
-private fun embedContainerIntoEditor(editor: Editor, offset: Int): JPanel {
-    val wrapper = JPanel(BorderLayout()).apply {
+private fun createResultContainer(): JPanel {
+    val toolbar = createToolbar()
+
+    val container = JPanel(BorderLayout()).apply {
+        layout = OverlayLayout(this)
         border = BorderFactory.createCompoundBorder(
             BorderFactory.createLineBorder(JBColor.border(), 1),
             JBUI.Borders.empty(4)
         )
         background = JBColor.background()
-        preferredSize = Dimension(700, 50)
+        preferredSize = Dimension(700, 250)
     }
 
+    val toolbarWrapper = JPanel(FlowLayout(FlowLayout.RIGHT, 5, 5)).apply {
+        isOpaque = false
+        alignmentX = 1.0f
+        alignmentY = 0.0f
+        add(toolbar.component)
+        toolbar.targetComponent = this
+    }
+    val contentPanel = JPanel(BorderLayout()).apply {
+        isOpaque = false
+        alignmentX = 1f
+        alignmentY = 1f
+    }
+    container.add(toolbarWrapper)
+    container.add(contentPanel)
+
+    return container
+}
+
+private fun embedContainerIntoEditor(editor: Editor, container:JPanel, offset: Int) {
     val manager = EditorEmbeddedComponentManager.getInstance()
     val properties = EditorEmbeddedComponentManager.Properties(
         EditorEmbeddedComponentManager.ResizePolicy.any(),
@@ -333,10 +370,28 @@ private fun embedContainerIntoEditor(editor: Editor, offset: Int): JPanel {
     )
 
     invokeLater {
-        manager.addComponent(editor as EditorEx, wrapper, properties)
+        manager.addComponent(editor as EditorEx, container, properties)
+    }
+}
+
+private fun createToolbar(): ActionToolbar {
+    val copyAction = object : AnAction("Copy", "Copy output", AllIcons.Actions.Copy) {
+        override fun actionPerformed(e: AnActionEvent) {
+            val content = "console.text"
+            CopyPasteManager.getInstance().setContents(StringSelection(content))
+        }
     }
 
-    return wrapper
+    val actionGroup = DefaultActionGroup(copyAction)
+
+    val toolbar = ActionManager.getInstance()
+        .createActionToolbar("ConsoleInlay", actionGroup, false)
+        .apply {
+            layoutStrategy = ToolbarLayoutStrategy.AUTOLAYOUT_STRATEGY
+            orientation = SwingConstants.VERTICAL
+            component.isOpaque = false
+        }
+    return toolbar
 }
 
 private fun makeKey(editor: Editor, featureId: String, line: Int): String = "${editor.hashCode()}_${featureId}_$line"
