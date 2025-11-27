@@ -3,7 +3,6 @@ package com.github.xepozz.call.feature.shell
 import com.github.xepozz.call.base.api.ExtractedBlock
 import com.github.xepozz.call.base.api.FeatureGenerator
 import com.github.xepozz.call.base.api.FeatureMatch
-import com.github.xepozz.call.base.api.Wrapper
 import com.github.xepozz.call.base.util.RegexpMatcher
 import com.intellij.execution.configurations.GeneralCommandLine
 import com.intellij.execution.process.OSProcessHandler
@@ -23,7 +22,7 @@ import javax.swing.Icon
 /**
  * Feature adapter that delegates matching and execution to existing ShellExecutionHandler.
  */
-class ShellFeatureAdapter : FeatureGenerator {
+class ShellFeatureAdapter(val project: Project) : FeatureGenerator<ConsoleWrapperPanel> {
     override val id: String = "shell"
     override val icon: Icon = AllIcons.Actions.Execute
     override val tooltipPrefix: String = "Run"
@@ -48,7 +47,7 @@ class ShellFeatureAdapter : FeatureGenerator {
 
     override fun execute(
         match: FeatureMatch,
-        wrapper: Wrapper,
+        wrapper: ConsoleWrapperPanel,
         project: Project,
         onProcessCreated: (ProcessHandler?) -> Unit
     ) {
@@ -96,4 +95,6 @@ class ShellFeatureAdapter : FeatureGenerator {
             }
         })
     }
+
+    override fun createWrapper() = ConsoleWrapperPanel(project)
 }

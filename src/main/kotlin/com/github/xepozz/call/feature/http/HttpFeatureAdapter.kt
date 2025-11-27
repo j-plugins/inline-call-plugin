@@ -3,7 +3,6 @@ package com.github.xepozz.call.feature.http
 import com.github.xepozz.call.base.api.ExtractedBlock
 import com.github.xepozz.call.base.api.FeatureGenerator
 import com.github.xepozz.call.base.api.FeatureMatch
-import com.github.xepozz.call.base.api.Wrapper
 import com.github.xepozz.call.base.util.RegexpMatcher
 import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.ui.ConsoleView
@@ -25,7 +24,7 @@ import javax.swing.Icon
 /**
  * Feature adapter that delegates matching and execution to existing HttpExecutionHandler.
  */
-class HttpFeatureAdapter : FeatureGenerator {
+class HttpFeatureAdapter(val project: Project) : FeatureGenerator<HttpWrapperPanel> {
     override val id: String = "http"
     override val icon: Icon = AllIcons.General.Web
     override val tooltipPrefix: String = "Fetch"
@@ -55,7 +54,7 @@ class HttpFeatureAdapter : FeatureGenerator {
 
     override fun execute(
         match: FeatureMatch,
-        wrapper: Wrapper,
+        wrapper: HttpWrapperPanel,
         project: Project,
         onProcessCreated: (ProcessHandler?) -> Unit
     ) {
@@ -141,4 +140,6 @@ class HttpFeatureAdapter : FeatureGenerator {
             console.print("\n\n[Truncated...]", ConsoleViewContentType.LOG_WARNING_OUTPUT)
         }
     }
+
+    override fun createWrapper() = HttpWrapperPanel(project)
 }

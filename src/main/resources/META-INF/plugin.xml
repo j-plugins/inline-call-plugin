@@ -22,13 +22,18 @@
         <extensionPoint
                 dynamic="true"
                 interface="com.github.xepozz.call.base.api.LanguageTextExtractor"
+                area="IDEA_PROJECT"
                 name="languageTextExtractor"/>
         <extensionPoint
                 dynamic="true"
-                interface="com.github.xepozz.call.base.api.FeatureGenerator" name="feature"/>
+                interface="com.github.xepozz.call.base.api.FeatureGenerator"
+                area="IDEA_PROJECT"
+                name="feature"/>
         <extensionPoint
                 dynamic="true"
-                interface="com.github.xepozz.call.base.api.WrapperFactory" name="wrapperFactory"/>
+                interface="com.github.xepozz.call.base.api.WrapperFactory"
+                area="IDEA_PROJECT"
+                name="wrapperFactory"/>
     </extensionPoints>
 
     <extensions defaultExtensionNs="com.github.xepozz.call">
@@ -38,7 +43,5 @@
                 implementation="com.github.xepozz.call.base.extractors.AdapterLanguageExtractor"/>
         <feature implementation="com.github.xepozz.call.feature.shell.ShellFeatureAdapter"/>
         <feature implementation="com.github.xepozz.call.feature.http.HttpFeatureAdapter"/>
-        <wrapperFactory implementation="com.github.xepozz.call.base.wrappers.ConsoleWrapperFactory"/>
-        <wrapperFactory implementation="com.github.xepozz.call.base.wrappers.ToolbarWrapperFactory"/>
     </extensions>
 </idea-plugin>

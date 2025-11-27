@@ -4,7 +4,6 @@ import com.github.xepozz.call.base.api.FeatureGenerator
 import com.github.xepozz.call.base.api.FeatureMatch
 import com.github.xepozz.call.base.api.LanguageTextExtractor
 import com.github.xepozz.call.base.api.Wrapper
-import com.github.xepozz.call.base.api.WrapperFactory
 import com.github.xepozz.call.base.extractors.AdapterLanguageExtractor
 import com.github.xepozz.call.base.handlers.ExecutionState
 import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
@@ -100,9 +99,11 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             val matches = matchesByElement[element] ?: return true
             if (matches.isEmpty()) return true
 
+            val project = editor.project ?: return true
+
             matches.forEach { m ->
                 val offset = m.originalRange.startOffset
-                val pres = buildActionsPresentation(editor, editor.project, m)
+                val pres = buildActionsPresentation(editor, project, m)
                 sink.addInlineElement(offset, false, pres, false)
             }
             return true
@@ -121,7 +122,7 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             val blocks = extractors.flatMap { it.extract(file) }
             if (blocks.isEmpty()) return emptyMap()
 
-            val features = FeatureGenerator.EP_NAME.extensionList.filter { it.isEnabled(project) }
+            val features = FeatureGenerator.getApplicable(project)
             if (features.isEmpty()) return emptyMap()
 
             val matches = mutableMapOf<PsiElement, MutableList<FeatureMatch>>()
@@ -142,8 +143,8 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             return matches
         }
 
-        private fun buildActionsPresentation(editor: Editor, project: Project?, match: FeatureMatch): InlayPresentation {
-            val feature = FeatureGenerator.EP_NAME.extensionList.firstOrNull { it.id == match.featureId }
+        private fun buildActionsPresentation(editor: Editor, project: Project, match: FeatureMatch): InlayPresentation {
+            val feature = FeatureGenerator.getApplicable(project).firstOrNull { it.id == match.featureId }
             val icon: Icon? = feature?.icon
             val tooltip = feature?.let { "${it.tooltipPrefix}: ${match.value}" } ?: match.value
 
@@ -187,8 +188,8 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                     runPres = factory.withCursorOnHover(runPres, Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
                     runPres = factory.onClick(runPres, MouseButton.Left) { _, _ ->
                         if (project == null) return@onClick
-                        val feat = feature ?: return@onClick
-                        run(editor, project, feat, match, key, lineEndOffset)
+                        val featureGenerator = feature ?: return@onClick
+                        run(editor, project, featureGenerator, match, key, lineEndOffset)
                     }
                     parts += runPres
                 }
@@ -227,18 +228,17 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             return p
         }
 
-        private fun run(
+        private fun <TWrapper: Wrapper> run(
             editor: Editor,
             project: Project,
-            feature: FeatureGenerator,
+            feature: FeatureGenerator<TWrapper>,
             match: FeatureMatch,
             key: String,
             lineEndOffset: Int,
         ) {
             // Ensure wrapper exists and mounted
             var current = sessions[key]
-            val wrapper = WrapperFactory.getApplicable(feature).firstOrNull()?.create(match)
-                ?: return
+            val wrapper = feature.createWrapper()
 
 
             if (current?.container == null) {

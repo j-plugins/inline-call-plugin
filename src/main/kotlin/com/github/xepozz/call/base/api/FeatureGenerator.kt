@@ -1,14 +1,14 @@
 package com.github.xepozz.call.base.api
 
 import com.intellij.execution.process.ProcessHandler
-import com.intellij.openapi.extensions.ExtensionPointName
+import com.intellij.openapi.extensions.ProjectExtensionPointName
 import com.intellij.openapi.project.Project
 import javax.swing.Icon
 
 /**
  * Feature generator that finds matches and can execute them.
  */
-interface FeatureGenerator {
+interface FeatureGenerator<TWrapper : Wrapper> {
     val id: String
     val icon: Icon
     val tooltipPrefix: String
@@ -23,10 +23,20 @@ interface FeatureGenerator {
     /**
      * Execute the given match and stream output to the provided wrapper.
      */
-    fun execute(match: FeatureMatch, wrapper: Wrapper, project: Project, onProcessCreated: (ProcessHandler?) -> Unit = {})
+    fun execute(
+        match: FeatureMatch,
+        wrapper: TWrapper,
+        project: Project,
+        onProcessCreated: (ProcessHandler?) -> Unit = {}
+    )
+
+    fun createWrapper(): TWrapper
 
     companion object {
-        val EP_NAME: ExtensionPointName<FeatureGenerator> =
-            ExtensionPointName.Companion.create("com.github.xepozz.call.feature")
+        val EP_NAME: ProjectExtensionPointName<FeatureGenerator<*>> = ProjectExtensionPointName("com.github.xepozz.call.feature")
+
+        fun getApplicable(project: Project): List<FeatureGenerator<*>> =
+            EP_NAME.getExtensions(project).filter { it.isEnabled(project) }
+
     }
 }
