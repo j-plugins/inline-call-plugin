@@ -30,8 +30,7 @@ class XmlLanguageExtractor : LanguageTextExtractor {
                             ExtractedBlock(
                                 element = element,
                                 originalRange = textRange,
-                                originalText = text,
-                                normalizedText = text,
+                                text = text,
                                 mapping = OffsetMapping.Identity
                             )
                         )

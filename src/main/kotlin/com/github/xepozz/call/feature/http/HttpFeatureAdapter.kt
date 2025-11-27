@@ -1,10 +1,10 @@
 package com.github.xepozz.call.feature.http
 
-import com.github.xepozz.call.base.handlers.ExecutionHandler
 import com.github.xepozz.call.base.api.ExtractedBlock
 import com.github.xepozz.call.base.api.FeatureGenerator
 import com.github.xepozz.call.base.api.FeatureMatch
 import com.github.xepozz.call.base.api.Wrapper
+import com.github.xepozz.call.base.handlers.ExecutionHandler
 import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.ui.ConsoleView
 import com.intellij.execution.ui.ConsoleViewContentType
@@ -38,7 +38,7 @@ class HttpFeatureAdapter : FeatureGenerator, ExecutionHandler {
         .build()
 
     override fun match(block: ExtractedBlock, project: Project): List<FeatureMatch> {
-        val matches = findMatches(block.normalizedText)
+        val matches = findMatches(block.text)
         val base = block.originalRange.startOffset
         return matches.map { m ->
             val startOriginal = base + block.mapping.toOriginal(m.offset)

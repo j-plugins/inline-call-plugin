@@ -28,8 +28,7 @@ class KotlinLanguageExtractor : LanguageTextExtractor {
                         ExtractedBlock(
                             element = element,
                             originalRange = element.textRange ?: TextRange(0, text.length),
-                            originalText = text,
-                            normalizedText = text,
+                            text = text,
                             mapping = OffsetMapping.Identity
                         )
                     )
