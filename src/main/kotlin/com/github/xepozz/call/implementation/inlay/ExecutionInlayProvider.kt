@@ -3,6 +3,7 @@ package com.github.xepozz.call.implementation.inlay
 import com.github.xepozz.call.implementation.api.FeatureGenerator
 import com.github.xepozz.call.implementation.api.FeatureMatch
 import com.github.xepozz.call.implementation.api.LanguageTextExtractor
+import com.github.xepozz.call.implementation.api.Wrapper
 import com.github.xepozz.call.implementation.api.WrapperFactory
 import com.intellij.codeInsight.hints.*
 import com.intellij.codeInsight.hints.presentation.InlayPresentation
@@ -35,6 +36,14 @@ import java.awt.Dimension
  */
 @Suppress("UnstableApiUsage")
 class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
+
+    private data class ContainerHolder(
+        val container: JPanel,
+        var wrapper: Wrapper
+    )
+
+    // key: editorId + featureId + line (end offset position)
+    private val containers = java.util.concurrent.ConcurrentHashMap<String, ContainerHolder>()
 
     override val key: SettingsKey<NoSettings> = SettingsKey("call.implementation.inlay")
     override val name: String = "Call (Unified)"
@@ -109,34 +118,59 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
 
             return factory.onClick(withHandCursor, MouseButton.Left) { _, _ ->
                 if (project == null || feature == null) return@onClick
-                val wrapper = WrapperFactory.EP_NAME.extensionList.firstOrNull { it.supports(feature.id) }?.create(match)
+                val newWrapper = WrapperFactory.EP_NAME.extensionList.firstOrNull { it.supports(feature.id) }?.create(match)
                     ?: return@onClick
 
-                // Embed wrapper component directly into the editor near the match position
-                try {
-                    val start = match.originalRange.startOffset
-                    val line = editor.document.getLineNumber(start)
-                    val lineEndOffset = editor.document.getLineEndOffset(line)
-                    embedIntoEditor(editor, lineEndOffset, wrapper.component)
-                } catch (_: Throwable) {
-                    // ignore UI embedding errors, still execute feature
+                // Compute a stable key for this feature at the target line in this editor
+                val start = match.originalRange.startOffset
+                val line = editor.document.getLineNumber(start)
+                val lineEndOffset = editor.document.getLineEndOffset(line)
+                val key = makeKey(editor, feature.id, line)
+
+                // Reuse embedded container per feature+line; replace inner component
+                val holder = containers[key]
+                if (holder == null) {
+                    // First time: create container and embed into editor
+                    try {
+                        val container = embedContainerIntoEditor(editor, lineEndOffset)
+                        invokeLater {
+                            container.removeAll()
+                            container.add(newWrapper.component, BorderLayout.CENTER)
+                            container.revalidate()
+                            container.repaint()
+                        }
+                        containers[key] = ContainerHolder(container, newWrapper)
+                    } catch (_: Throwable) {
+                        // ignore UI embedding errors, still execute feature
+                    }
+                } else {
+                    // Replace previous wrapper component only for this feature
+                    val oldWrapper = holder.wrapper
+                    invokeLater {
+                        holder.container.removeAll()
+                        holder.container.add(newWrapper.component, BorderLayout.CENTER)
+                        holder.container.revalidate()
+                        holder.container.repaint()
+                    }
+                    // Dispose old wrapper to free resources
+                    try { oldWrapper.dispose() } catch (_: Throwable) {}
+                    holder.wrapper = newWrapper
                 }
 
-                // Execute feature after showing wrapper
-                feature.execute(match, wrapper, project) { /* ignore */ }
+                // Execute feature after (re)showing wrapper
+                feature.execute(match, newWrapper, project) { /* ignore */ }
             }
         }
     }
 }
 
-private fun embedIntoEditor(editor: Editor, offset: Int, component: JComponent): JComponent {
+private fun embedContainerIntoEditor(editor: Editor, offset: Int): JPanel {
     val wrapper = JPanel(BorderLayout()).apply {
         border = BorderFactory.createCompoundBorder(
             BorderFactory.createLineBorder(JBColor.border(), 1),
             JBUI.Borders.empty(4)
         )
         background = JBColor.background()
-        add(component, BorderLayout.CENTER)
         preferredSize = Dimension(700, 250)
     }
 
@@ -156,3 +190,5 @@ private fun embedIntoEditor(editor: Editor, offset: Int, component: JComponent):
 
     return wrapper
 }
+
+private fun makeKey(editor: Editor, featureId: String, line: Int): String = "${editor.hashCode()}_${featureId}_$line"
