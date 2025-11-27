@@ -1,40 +1,47 @@
 package com.github.xepozz.call.base.inlay
 
-import com.github.xepozz.call.base.extractors.AdapterLanguageExtractor
 import com.github.xepozz.call.base.api.FeatureGenerator
 import com.github.xepozz.call.base.api.FeatureMatch
 import com.github.xepozz.call.base.api.LanguageTextExtractor
 import com.github.xepozz.call.base.api.Wrapper
 import com.github.xepozz.call.base.api.WrapperFactory
+import com.github.xepozz.call.base.extractors.AdapterLanguageExtractor
 import com.github.xepozz.call.base.handlers.ExecutionState
 import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
-import com.intellij.codeInsight.hints.*
+import com.intellij.codeInsight.daemon.impl.InlayHintsPassFactoryInternal
+import com.intellij.codeInsight.hints.ChangeListener
+import com.intellij.codeInsight.hints.FactoryInlayHintsCollector
+import com.intellij.codeInsight.hints.ImmediateConfigurable
+import com.intellij.codeInsight.hints.InlayHintsCollector
+import com.intellij.codeInsight.hints.InlayHintsProvider
+import com.intellij.codeInsight.hints.InlayHintsSink
+import com.intellij.codeInsight.hints.NoSettings
+import com.intellij.codeInsight.hints.SettingsKey
 import com.intellij.codeInsight.hints.presentation.InlayPresentation
 import com.intellij.codeInsight.hints.presentation.MouseButton
-import com.intellij.codeInsight.daemon.impl.InlayHintsPassFactoryInternal
-import com.intellij.execution.process.ProcessAdapter
 import com.intellij.execution.process.ProcessEvent
-import com.intellij.openapi.editor.Editor
-import com.intellij.openapi.project.Project
+import com.intellij.execution.process.ProcessHandler
+import com.intellij.execution.process.ProcessListener
+import com.intellij.icons.AllIcons
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.invokeLater
+import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.ex.EditorEx
 import com.intellij.openapi.editor.impl.EditorEmbeddedComponentManager
-import com.intellij.ui.JBColor
-import com.intellij.util.ui.JBUI
+import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.Disposer
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
-import java.awt.Cursor
+import com.intellij.ui.JBColor
+import com.intellij.ui.dsl.builder.panel
+import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
+import java.awt.Cursor
+import java.awt.Dimension
+import java.util.concurrent.ConcurrentHashMap
+import javax.swing.BorderFactory
 import javax.swing.Icon
 import javax.swing.JPanel
-import javax.swing.BorderFactory
-import java.awt.Dimension
-import com.intellij.icons.AllIcons
-import com.intellij.execution.process.ProcessHandler
-import com.intellij.openapi.Disposable
-import com.intellij.openapi.util.Disposer
-import com.intellij.ui.dsl.builder.panel
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Unified InlayHintsProvider that uses the new extensible mechanism:
@@ -218,36 +225,28 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             lineEndOffset: Int,
         ) {
             // Ensure wrapper exists and mounted
-            val current = sessions[key]
+            var current = sessions[key]
             val wrapper = WrapperFactory.EP_NAME.extensionList.firstOrNull { it.supports(feature.id) }?.create(match)
                 ?: return
 
             if (current?.container == null) {
                 try {
                     val container = embedContainerIntoEditor(editor, lineEndOffset)
-                    invokeLater {
-                        container.removeAll()
-                        container.add(wrapper.component, BorderLayout.CENTER)
-                        container.revalidate()
-                        container.repaint()
-                    }
-                    sessions[key] = Session(container, wrapper).also { it.state = ExecutionState.RUNNING }
+                    mountWrapperIntoContainer(container, wrapper)
+
+                    current = Session(container, wrapper)
+                    sessions[key] = current
                 } catch (_: Throwable) {
                     // If embedding fails, still execute without container
-                    sessions[key] = Session(null, wrapper).also { it.state = ExecutionState.RUNNING }
+                    current = Session(null, wrapper)
+                    sessions[key] = current
                 }
+                current.state = ExecutionState.RUNNING
             } else {
                 // Replace previous wrapper in the existing container
                 val container = current.container
                 val oldWrapper = current.wrapper
-                if (container != null) {
-                    invokeLater {
-                        container.removeAll()
-                        container.add(wrapper.component, BorderLayout.CENTER)
-                        container.revalidate()
-                        container.repaint()
-                    }
-                }
+                mountWrapperIntoContainer(container, wrapper)
                 try { oldWrapper?.dispose() } catch (_: Throwable) {}
                 current.wrapper = wrapper
                 current.state = ExecutionState.RUNNING
@@ -260,13 +259,22 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             feature.execute(match, wrapper, project) { ph ->
                 sess.processHandler = ph
                 // When process terminates, mark as FINISHED
-                ph?.addProcessListener(object : ProcessAdapter() {
+                ph?.addProcessListener(object : ProcessListener {
                     override fun processTerminated(event: ProcessEvent) {
                         sess.state = ExecutionState.FINISHED
                         sess.processHandler = null
                         refreshInlays(editor)
                     }
                 })
+            }
+        }
+
+        private fun mountWrapperIntoContainer(container: JPanel, wrapper: Wrapper) {
+            invokeLater {
+                container.removeAll()
+                container.add(wrapper.component, BorderLayout.CENTER)
+                container.revalidate()
+                container.repaint()
             }
         }
 
@@ -311,7 +319,7 @@ private fun embedContainerIntoEditor(editor: Editor, offset: Int): JPanel {
             JBUI.Borders.empty(4)
         )
         background = JBColor.background()
-        preferredSize = Dimension(700, 250)
+        preferredSize = Dimension(700, 50)
     }
 
     val manager = EditorEmbeddedComponentManager.getInstance()
