@@ -35,14 +35,6 @@ import java.util.concurrent.ConcurrentHashMap
 import javax.swing.Icon
 import javax.swing.JPanel
 
-/**
- * Unified InlayHintsProvider that uses the new extensible mechanism:
- *  - LanguageTextExtractor EP to collect text blocks
- *  - FeatureGenerator EP to match features within blocks
- *  - WrapperFactory EP to create output wrappers on Run
- *
- * Minimal Phase 1: renders a single Run action per match.
- */
 @Suppress("UnstableApiUsage")
 class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
     // key: editorId + featureId + line
@@ -83,31 +75,25 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
 
         private fun computeMatches(file: PsiFile): Map<PsiElement, List<FeatureMatch>> {
             val project = file.project
-            val applicable = LanguageTextExtractor.getApplicable(file)
-            if (applicable.isEmpty()) return emptyMap()
+            val allExtractors = LanguageTextExtractor.getApplicable(file).ifEmpty { return emptyMap() }
 
-            // Prefer language-specific extractors over the generic fallback (AdapterLanguageExtractor)
-            val specific = applicable.filter { it !is AdapterLanguageExtractor }
-            val extractors = specific.ifEmpty { applicable }
+            val languageSpecificExtractors = allExtractors.filter { it !is AdapterLanguageExtractor }
+            val extractors = languageSpecificExtractors.ifEmpty { allExtractors }
             println("file: $file, extractors: ${extractors.map { it.javaClass }}")
 
-            val blocks = extractors.flatMap { it.extract(file) }
-            if (blocks.isEmpty()) return emptyMap()
+            val blocks = extractors.flatMap { it.extract(file) }.ifEmpty { return emptyMap() }
 
-            val features = FeatureGenerator.getApplicable(project)
-            if (features.isEmpty()) return emptyMap()
+            val featureGenerators = FeatureGenerator.getApplicable(project).ifEmpty { return emptyMap() }
 
             val matches = mutableMapOf<PsiElement, MutableList<FeatureMatch>>()
-            for (b in blocks) {
-                for (f in features) {
-                    val ms = f.match(b, project)
-                    if (ms.isNotEmpty()) {
-                        matches.computeIfAbsent(b.element) { mutableListOf() }.addAll(ms)
-                    }
+            for (block in blocks) {
+                for (featureGenerator in featureGenerators) {
+                    val featureMatches = featureGenerator.match(block, project).ifEmpty { continue }
+
+                    matches.computeIfAbsent(block.element) { mutableListOf() }.addAll(featureMatches)
                 }
             }
 
-            // Sort matches by start offset for stable rendering
             matches.values.forEach { list ->
                 list.sortBy { it.originalRange.startOffset }
             }
@@ -120,7 +106,6 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             val icon: Icon? = feature?.icon
             val tooltip = feature?.let { "${it.tooltipPrefix}: ${match.value}" } ?: match.value
 
-            // Compute session key
             val start = match.originalRange.startOffset
             val line = editor.document.getLineNumber(start)
             val lineEndOffset = editor.document.getLineEndOffset(line)
@@ -134,7 +119,7 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                 val collapseIcon = if (session.collapsed) AllIcons.General.ArrowRight else AllIcons.General.ArrowDown
                 val collapseTooltip = if (session.collapsed) "Expand" else "Collapse"
                 parts += clickableIcon(collapseIcon, collapseTooltip) {
-                    toggleCollapse(key)
+                    toggleCollapse(session)
                     refreshInlays(editor)
                 }
             }
@@ -152,6 +137,7 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                         refreshInlays(editor)
                     }
                 }
+
                 ExecutionState.IDLE -> {
                     // Initial Run button
                     val runText = factory.inset(factory.roundWithBackground(factory.text(" Run ")), left = 2, right = 2)
@@ -165,6 +151,7 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                     }
                     parts += runPres
                 }
+
                 ExecutionState.FINISHED -> {
                     // After first launch: show Rerun icon + "Run" text
                     val rerunIcon = AllIcons.Actions.Rerun
@@ -200,7 +187,7 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             return p
         }
 
-        private fun <TWrapper: Wrapper> run(
+        private fun <TWrapper : Wrapper> run(
             editor: Editor,
             project: Project,
             feature: FeatureGenerator<TWrapper>,
@@ -231,11 +218,14 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                 // Replace previous wrapper in the existing container
                 val container = current.container
                 val oldWrapper = current.wrapper
-                if (oldWrapper!=null) {
+                if (oldWrapper != null) {
                     container.remove(oldWrapper.component)
                 }
                 mountWrapperIntoContainer(container, wrapper)
-                try { oldWrapper?.dispose() } catch (_: Throwable) {}
+                try {
+                    oldWrapper?.dispose()
+                } catch (_: Throwable) {
+                }
                 current.wrapper = wrapper
                 current.state = ExecutionState.RUNNING
             }
@@ -266,28 +256,27 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
         }
 
         private fun stop(key: String) {
-            val s = sessions[key] ?: return
-            s.processHandler?.destroyProcess()
-            s.processHandler = null
-            s.state = ExecutionState.FINISHED
+            val session = sessions[key] ?: return
+            session.processHandler?.destroyProcess()
+            session.processHandler = null
+            session.state = ExecutionState.FINISHED
         }
 
         private fun delete(key: String) {
-            val s = sessions.remove(key) ?: return
-            try { s.processHandler?.destroyProcess() } catch (_: Throwable) {}
-            s.processHandler = null
+            val session = sessions.remove(key) ?: return
+            try { session.processHandler?.destroyProcess() } catch (_: Throwable) { }
+            session.processHandler = null
             invokeLater {
-                s.container?.parent?.remove(s.container)
+                session.container?.parent?.remove(session.container)
             }
-            try { s.wrapper?.dispose() } catch (_: Throwable) {}
-            Disposer.dispose(s.disposable)
+            try { session.wrapper?.dispose() } catch (_: Throwable) { }
+            Disposer.dispose(session.disposable)
         }
 
-        private fun toggleCollapse(key: String) {
-            val s = sessions[key] ?: return
-            s.collapsed = !s.collapsed
-            val visible = !s.collapsed
-            invokeLater { s.container?.isVisible = visible }
+        private fun toggleCollapse(session: Session) {
+            session.collapsed = !session.collapsed
+            val visible = !session.collapsed
+            invokeLater { session.container?.isVisible = visible }
         }
 
         private fun refreshInlays(editor: Editor) {
