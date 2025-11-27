@@ -60,20 +60,16 @@ class ShellFeatureAdapter : FeatureGenerator {
                 indicator.isIndeterminate = true
                 indicator.text = "Running shell command"
                 indicator.text2 = value
+
+                val commandLine = GeneralCommandLine("/bin/sh", "-c", value)
+                    .withRedirectErrorStream(true)
+                val processHandler = OSProcessHandler(commandLine)
+                ProcessTerminatedListener.attach(processHandler)
+                console.attachToProcess(processHandler)
+                onProcessCreated(processHandler)
+
                 try {
-                    val commandLine = GeneralCommandLine("/bin/sh", "-c", value)
-                        .withRedirectErrorStream(true)
-
-                    val processHandler = OSProcessHandler(commandLine)
-                    // Attach default terminated listener to print exit code to console
-                    ProcessTerminatedListener.attach(processHandler)
-
-                    // Attach console and notify orchestrator on EDT
-                    invokeLater {
-                        console.attachToProcess(processHandler)
-                        onProcessCreated(processHandler)
-                        processHandler.startNotify()
-                    }
+                    processHandler.startNotify()
 
                     // Keep progress indicator alive until process finishes or user cancels
                     while (!processHandler.isProcessTerminated) {
