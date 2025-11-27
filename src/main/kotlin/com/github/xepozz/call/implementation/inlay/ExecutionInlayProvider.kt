@@ -9,6 +9,7 @@ import com.intellij.codeInsight.hints.*
 import com.intellij.codeInsight.hints.presentation.InlayPresentation
 import com.intellij.codeInsight.hints.presentation.MouseButton
 import com.intellij.codeInsight.hints.presentation.PresentationFactory
+import com.intellij.codeInsight.daemon.impl.InlayHintsPassFactoryInternal
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.application.invokeLater
@@ -25,6 +26,10 @@ import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.BorderFactory
 import java.awt.Dimension
+import com.intellij.icons.AllIcons
+import com.intellij.execution.process.ProcessHandler
+import com.intellij.openapi.Disposable
+import com.intellij.openapi.util.Disposer
 
 /**
  * Unified InlayHintsProvider that uses the new extensible mechanism:
@@ -37,13 +42,17 @@ import java.awt.Dimension
 @Suppress("UnstableApiUsage")
 class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
 
-    private data class ContainerHolder(
-        val container: JPanel,
-        var wrapper: Wrapper
+    private data class Session(
+        val container: JPanel?,
+        var wrapper: Wrapper?,
+        var state: com.github.xepozz.call.handlers.ExecutionState = com.github.xepozz.call.handlers.ExecutionState.IDLE,
+        var processHandler: ProcessHandler? = null,
+        var collapsed: Boolean = false,
+        val disposable: Disposable = Disposer.newDisposable("Call.Inlay.Session")
     )
 
-    // key: editorId + featureId + line (end offset position)
-    private val containers = java.util.concurrent.ConcurrentHashMap<String, ContainerHolder>()
+    // key: editorId + featureId + line
+    private val sessions = java.util.concurrent.ConcurrentHashMap<String, Session>()
 
     override val key: SettingsKey<NoSettings> = SettingsKey("call.implementation.inlay")
     override val name: String = "Call (Unified)"
@@ -70,7 +79,7 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
 
             matches.forEach { m ->
                 val offset = m.originalRange.startOffset
-                val pres = buildRunPresentation(editor, editor.project, m)
+                val pres = buildActionsPresentation(editor, editor.project, m)
                 sink.addInlineElement(offset, false, pres, false)
             }
             return true
@@ -105,60 +114,181 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             return matches
         }
 
-        private fun buildRunPresentation(editor: Editor, project: Project?, match: FeatureMatch): InlayPresentation {
+        private fun buildActionsPresentation(editor: Editor, project: Project?, match: FeatureMatch): InlayPresentation {
             val feature = FeatureGenerator.EP_NAME.extensionList.firstOrNull { it.id == match.featureId }
             val icon: Icon? = feature?.icon
             val tooltip = feature?.let { "${it.tooltipPrefix}: ${match.value}" } ?: match.value
 
-            val clickable = factory.inset(factory.roundWithBackground(factory.text(" Run ")), left = 2, right = 2)
-            val withIcon = icon?.let { factory.seq(factory.icon(it), clickable) } ?: clickable
-            val withTooltip = factory.withTooltip(tooltip, withIcon)
-            // Use hand cursor to look like a link on hover
-            val withHandCursor = factory.withCursorOnHover(withTooltip, Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
+            // Compute session key
+            val start = match.originalRange.startOffset
+            val line = editor.document.getLineNumber(start)
+            val lineEndOffset = editor.document.getLineEndOffset(line)
+            val key = makeKey(editor, match.featureId, line)
+            val session = sessions[key]
 
-            return factory.onClick(withHandCursor, MouseButton.Left) { _, _ ->
-                if (project == null || feature == null) return@onClick
-                val newWrapper = WrapperFactory.EP_NAME.extensionList.firstOrNull { it.supports(feature.id) }?.create(match)
-                    ?: return@onClick
+            val parts = mutableListOf<InlayPresentation>()
 
-                // Compute a stable key for this feature at the target line in this editor
-                val start = match.originalRange.startOffset
-                val line = editor.document.getLineNumber(start)
-                val lineEndOffset = editor.document.getLineEndOffset(line)
-                val key = makeKey(editor, feature.id, line)
-
-                // Reuse embedded container per feature+line; replace inner component
-                val holder = containers[key]
-                if (holder == null) {
-                    // First time: create container and embed into editor
-                    try {
-                        val container = embedContainerIntoEditor(editor, lineEndOffset)
-                        invokeLater {
-                            container.removeAll()
-                            container.add(newWrapper.component, BorderLayout.CENTER)
-                            container.revalidate()
-                            container.repaint()
-                        }
-                        containers[key] = ContainerHolder(container, newWrapper)
-                    } catch (_: Throwable) {
-                        // ignore UI embedding errors, still execute feature
-                    }
-                } else {
-                    // Replace previous wrapper component only for this feature
-                    val oldWrapper = holder.wrapper
-                    invokeLater {
-                        holder.container.removeAll()
-                        holder.container.add(newWrapper.component, BorderLayout.CENTER)
-                        holder.container.revalidate()
-                        holder.container.repaint()
-                    }
-                    // Dispose old wrapper to free resources
-                    try { oldWrapper.dispose() } catch (_: Throwable) {}
-                    holder.wrapper = newWrapper
+            // Collapse/Expand appears when wrapper (container) is mounted
+            if (session?.container != null) {
+                val collapseIcon = if (session.collapsed) AllIcons.General.ArrowRight else AllIcons.General.ArrowDown
+                val collapseTooltip = if (session.collapsed) "Expand" else "Collapse"
+                parts += clickableIcon(collapseIcon, collapseTooltip) {
+                    toggleCollapse(key)
+                    refreshInlays(editor)
                 }
+            }
 
-                // Execute feature after (re)showing wrapper
-                feature.execute(match, newWrapper, project) { /* ignore */ }
+            when (session?.state ?: com.github.xepozz.call.handlers.ExecutionState.IDLE) {
+                com.github.xepozz.call.handlers.ExecutionState.RUNNING -> {
+                    // Stop button
+                    parts += clickableIcon(AllIcons.Actions.Suspend, "Stop") {
+                        stop(key)
+                        refreshInlays(editor)
+                    }
+                    // Delete button — reset state to never-run and remove UI
+                    parts += clickableIcon(AllIcons.General.Remove, "Delete") {
+                        delete(key)
+                        refreshInlays(editor)
+                    }
+                }
+                com.github.xepozz.call.handlers.ExecutionState.IDLE -> {
+                    // Initial Run button
+                    val runText = factory.inset(factory.roundWithBackground(factory.text(" Run ")), left = 2, right = 2)
+                    val withIcon = icon?.let { factory.seq(factory.icon(it), runText) } ?: runText
+                    var runPres: InlayPresentation = factory.withTooltip(tooltip, withIcon)
+                    runPres = factory.withCursorOnHover(runPres, Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
+                    runPres = factory.onClick(runPres, MouseButton.Left) { _, _ ->
+                        if (project == null) return@onClick
+                        val feat = feature ?: return@onClick
+                        run(editor, project, feat, match, key, lineEndOffset)
+                    }
+                    parts += runPres
+                }
+                com.github.xepozz.call.handlers.ExecutionState.FINISHED -> {
+                    // After first launch: show Rerun icon + "Run" text
+                    val rerunIcon = AllIcons.Actions.Rerun
+                    val rerunTooltip = "Rerun: ${match.value}"
+                    val runText = factory.inset(factory.roundWithBackground(factory.text(" Run ")), left = 2, right = 2)
+                    val withIcon = factory.seq(factory.icon(rerunIcon), runText)
+                    var rerunPres: InlayPresentation = factory.withTooltip(rerunTooltip, withIcon)
+                    rerunPres = factory.withCursorOnHover(rerunPres, Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
+                    rerunPres = factory.onClick(rerunPres, MouseButton.Left) { _, _ ->
+                        if (project == null) return@onClick
+                        val feat = feature ?: return@onClick
+                        run(editor, project, feat, match, key, lineEndOffset)
+                    }
+                    parts += rerunPres
+
+                    // Also allow to delete/reset after successful completion
+                    parts += clickableIcon(AllIcons.General.Remove, "Delete") {
+                        delete(key)
+                        refreshInlays(editor)
+                    }
+                }
+            }
+
+            return if (parts.size == 1) parts.first() else factory.seq(*parts.toTypedArray())
+        }
+
+        private fun clickableIcon(icon: Icon, tooltip: String, onClick: () -> Unit): InlayPresentation {
+            var p: InlayPresentation = factory.icon(icon)
+            p = factory.inset(p, 2, 2, 0, 0)
+            p = factory.withTooltip(tooltip, p)
+            p = factory.withCursorOnHover(p, Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
+            p = factory.onClick(p, MouseButton.Left) { _, _ -> onClick() }
+            return p
+        }
+
+        private fun run(
+            editor: Editor,
+            project: Project,
+            feature: FeatureGenerator,
+            match: FeatureMatch,
+            key: String,
+            lineEndOffset: Int,
+        ) {
+            // Ensure wrapper exists and mounted
+            val current = sessions[key]
+            val wrapper = WrapperFactory.EP_NAME.extensionList.firstOrNull { it.supports(feature.id) }?.create(match)
+                ?: return
+
+            if (current?.container == null) {
+                try {
+                    val container = embedContainerIntoEditor(editor, lineEndOffset)
+                    invokeLater {
+                        container.removeAll()
+                        container.add(wrapper.component, BorderLayout.CENTER)
+                        container.revalidate()
+                        container.repaint()
+                    }
+                    sessions[key] = Session(container, wrapper).also { it.state = com.github.xepozz.call.handlers.ExecutionState.RUNNING }
+                } catch (_: Throwable) {
+                    // If embedding fails, still execute without container
+                    sessions[key] = Session(null, wrapper).also { it.state = com.github.xepozz.call.handlers.ExecutionState.RUNNING }
+                }
+            } else {
+                // Replace previous wrapper in the existing container
+                val container = current.container
+                val oldWrapper = current.wrapper
+                if (container != null) {
+                    invokeLater {
+                        container.removeAll()
+                        container.add(wrapper.component, BorderLayout.CENTER)
+                        container.revalidate()
+                        container.repaint()
+                    }
+                }
+                try { oldWrapper?.dispose() } catch (_: Throwable) {}
+                current.wrapper = wrapper
+                current.state = com.github.xepozz.call.handlers.ExecutionState.RUNNING
+            }
+
+            refreshInlays(editor)
+
+            // Execute and capture process lifecycle
+            val sess = sessions[key] ?: return
+            feature.execute(match, wrapper, project) { ph ->
+                sess.processHandler = ph
+                // When process terminates, mark as FINISHED
+                ph?.addProcessListener(object : com.intellij.execution.process.ProcessAdapter() {
+                    override fun processTerminated(event: com.intellij.execution.process.ProcessEvent) {
+                        sess.state = com.github.xepozz.call.handlers.ExecutionState.FINISHED
+                        sess.processHandler = null
+                        refreshInlays(editor)
+                    }
+                })
+            }
+        }
+
+        private fun stop(key: String) {
+            val s = sessions[key] ?: return
+            s.processHandler?.destroyProcess()
+            s.processHandler = null
+            s.state = com.github.xepozz.call.handlers.ExecutionState.FINISHED
+        }
+
+        private fun delete(key: String) {
+            val s = sessions.remove(key) ?: return
+            try { s.processHandler?.destroyProcess() } catch (_: Throwable) {}
+            s.processHandler = null
+            invokeLater {
+                s.container?.parent?.remove(s.container)
+            }
+            try { s.wrapper?.dispose() } catch (_: Throwable) {}
+            Disposer.dispose(s.disposable)
+        }
+
+        private fun toggleCollapse(key: String) {
+            val s = sessions[key] ?: return
+            s.collapsed = !s.collapsed
+            val visible = !s.collapsed
+            invokeLater { s.container?.isVisible = visible }
+        }
+
+        private fun refreshInlays(editor: Editor) {
+            invokeLater {
+                InlayHintsPassFactoryInternal.forceHintsUpdateOnNextPass()
+                com.intellij.codeInsight.daemon.DaemonCodeAnalyzer.getInstance(editor.project ?: return@invokeLater).restart()
             }
         }
     }
