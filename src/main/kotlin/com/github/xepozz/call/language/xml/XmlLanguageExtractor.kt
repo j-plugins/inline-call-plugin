@@ -1,11 +1,9 @@
 package com.github.xepozz.call.language.xml
 
-import com.github.xepozz.call.implementation.api.ExtractedBlock
-import com.github.xepozz.call.implementation.api.LanguageTextExtractor
-import com.github.xepozz.call.implementation.api.OffsetMapping
-import com.intellij.openapi.util.TextRange
+import com.github.xepozz.call.base.api.ExtractedBlock
+import com.github.xepozz.call.base.api.LanguageTextExtractor
+import com.github.xepozz.call.base.api.OffsetMapping
 import com.intellij.psi.PsiComment
-import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiRecursiveElementVisitor
 import com.intellij.psi.xml.XmlComment

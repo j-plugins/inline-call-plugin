@@ -1,8 +1,8 @@
 package com.github.xepozz.call.language.kotlin
 
-import com.github.xepozz.call.implementation.api.ExtractedBlock
-import com.github.xepozz.call.implementation.api.LanguageTextExtractor
-import com.github.xepozz.call.implementation.api.OffsetMapping
+import com.github.xepozz.call.base.api.ExtractedBlock
+import com.github.xepozz.call.base.api.LanguageTextExtractor
+import com.github.xepozz.call.base.api.OffsetMapping
 import com.intellij.openapi.util.TextRange
 import com.intellij.psi.PsiComment
 import com.intellij.psi.PsiElement

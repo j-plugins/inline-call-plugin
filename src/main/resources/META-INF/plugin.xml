@@ -15,29 +15,29 @@
         <!-- New unified inlay provider based on the extensible mechanism -->
         <codeInsight.inlayProvider
                 language="HTML"
-                implementationClass="com.github.xepozz.call.implementation.inlay.ExecutionInlayProvider"/>
+                implementationClass="com.github.xepozz.call.base.inlay.ExecutionInlayProvider"/>
     </extensions>
 
     <extensionPoints>
         <extensionPoint
                 dynamic="true"
-                interface="com.github.xepozz.call.implementation.api.LanguageTextExtractor"
+                interface="com.github.xepozz.call.base.api.LanguageTextExtractor"
                 name="languageTextExtractor"/>
         <extensionPoint
                 dynamic="true"
-                interface="com.github.xepozz.call.implementation.api.FeatureGenerator" name="feature"/>
+                interface="com.github.xepozz.call.base.api.FeatureGenerator" name="feature"/>
         <extensionPoint
                 dynamic="true"
-                interface="com.github.xepozz.call.implementation.api.WrapperFactory" name="wrapperFactory"/>
+                interface="com.github.xepozz.call.base.api.WrapperFactory" name="wrapperFactory"/>
     </extensionPoints>
 
     <extensions defaultExtensionNs="com.github.xepozz.call">
         <!-- Default implementations for the new architecture (Phase 1) -->
         <languageTextExtractor
                 order="last"
-                implementation="com.github.xepozz.call.implementation.extractors.AdapterLanguageExtractor"/>
-        <feature implementation="com.github.xepozz.call.implementation.features.ShellFeatureAdapter"/>
-        <feature implementation="com.github.xepozz.call.implementation.features.HttpFeatureAdapter"/>
-        <wrapperFactory implementation="com.github.xepozz.call.implementation.wrappers.ConsoleWrapperFactory"/>
+                implementation="com.github.xepozz.call.base.extractors.AdapterLanguageExtractor"/>
+        <feature implementation="com.github.xepozz.call.feature.shell.ShellFeatureAdapter"/>
+        <feature implementation="com.github.xepozz.call.feature.http.HttpFeatureAdapter"/>
+        <wrapperFactory implementation="com.github.xepozz.call.base.wrappers.ConsoleWrapperFactory"/>
     </extensions>
 </idea-plugin>
