@@ -53,29 +53,47 @@ class ShellFeatureAdapter : FeatureGenerator, ExecutionHandler {
     ) {
         val value = match.value
         val console = wrapper.console
-        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Executing", true) {
+        // Run with progress indicator similar to HTTP feature
+        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Executing shell command", true) {
             override fun run(indicator: ProgressIndicator) {
+                indicator.isIndeterminate = true
+                indicator.text = "Running shell command"
+                indicator.text2 = value
                 try {
                     val commandLine = GeneralCommandLine("/bin/sh", "-c", value)
                         .withRedirectErrorStream(true)
 
                     val processHandler = OSProcessHandler(commandLine)
+                    // Attach default terminated listener to print exit code to console
                     ProcessTerminatedListener.attach(processHandler)
 
+                    // Attach console and notify orchestrator on EDT
                     invokeLater {
-//                        if (!Disposer.isDisposed(disposable)) {
                         console.attachToProcess(processHandler)
                         onProcessCreated(processHandler)
                         processHandler.startNotify()
-//                        }
                     }
 
+                    // Keep progress indicator alive until process finishes or user cancels
+                    while (!processHandler.isProcessTerminated) {
+                        if (indicator.isCanceled) {
+                            // User canceled via progress UI; destroy the process
+                            processHandler.destroyProcess()
+                            break
+                        }
+                        // Slight sleep to avoid busy waiting; progress stays visible
+                        try {
+                            Thread.sleep(50)
+                        } catch (_: InterruptedException) {
+                            // If interrupted, attempt to stop process and exit
+                            processHandler.destroyProcess()
+                            break
+                        }
+                    }
                 } catch (e: Exception) {
                     invokeLater {
                         onProcessCreated(null)
-//                        if (!Disposer.isDisposed(disposable)) {
                         console.print("\n[Error: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
-//                        }
                     }
                 }
             }
