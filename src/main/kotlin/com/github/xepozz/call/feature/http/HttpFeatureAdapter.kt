@@ -32,7 +32,7 @@ class HttpFeatureAdapter(val project: Project) : FeatureGenerator<HttpWrapperPan
     val matcher = RegexpMatcher(Pattern.compile("(https?://[\\w\\-._~:/?#\\[\\]@!\$&'()*+,;=%]+)"))
 
     private val httpClient = HttpClient.newBuilder()
-        .connectTimeout(Duration.ofSeconds(10))
+        .connectTimeout(Duration.ofSeconds(60))
         .followRedirects(HttpClient.Redirect.NORMAL)
         .build()
 
@@ -60,16 +60,18 @@ class HttpFeatureAdapter(val project: Project) : FeatureGenerator<HttpWrapperPan
     ) {
         val value = match.value
         val console = wrapper.console
+        val bodyConsole = wrapper.bodyConsole
+        val headersConsole = wrapper.headersConsole
+
         console.print("GET $value\n", ConsoleViewContentType.SYSTEM_OUTPUT)
         console.print("Connecting...\n\n", ConsoleViewContentType.LOG_INFO_OUTPUT)
-        // Build request
+
         val request = HttpRequest.newBuilder()
             .uri(URI.create(value))
             .timeout(Duration.ofSeconds(30))
             .GET()
             .build()
 
-        // Create lightweight ProcessHandler to drive UI state transitions
         var future: CompletableFuture<HttpResponse<String>>? = null
         val terminated = AtomicBoolean(false)
         val handler = object : ProcessHandler() {
@@ -102,9 +104,9 @@ class HttpFeatureAdapter(val project: Project) : FeatureGenerator<HttpWrapperPan
         onProcessCreated(handler)
         handler.startNotify()
 
-        // Execute asynchronously; on completion signal process termination
         future = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
             .whenComplete { response, throwable ->
+                console.clear()
                 if (throwable != null) {
                     invokeLater {
                         console.print("[Error: ${throwable.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
@@ -112,33 +114,28 @@ class HttpFeatureAdapter(val project: Project) : FeatureGenerator<HttpWrapperPan
                     handler.complete(-1)
                 } else if (response != null) {
                     invokeLater {
-                        printResponse(console, response)
+                        printResponse(console, headersConsole, bodyConsole, response)
                     }
                     handler.complete(0)
                 }
             }
     }
 
-    private fun printResponse(console: ConsoleView, response: HttpResponse<String>) {
-        val statusType = when (response.statusCode()) {
-            in 200..299 -> ConsoleViewContentType.SYSTEM_OUTPUT
-            in 300..399 -> ConsoleViewContentType.LOG_WARNING_OUTPUT
-            else -> ConsoleViewContentType.ERROR_OUTPUT
-        }
-
-        console.print("HTTP ${response.statusCode()}\n", statusType)
-
-        console.print("\n--- Headers ---\n", ConsoleViewContentType.LOG_DEBUG_OUTPUT)
+    private fun printResponse(
+        console: ConsoleView,
+        headersConsole: ConsoleView,
+        bodyConsole: ConsoleView,
+        response: HttpResponse<String>,
+    ) {
         response.headers().map().entries.take(10).forEach { (k, v) ->
+            headersConsole.print("$k: ${v.firstOrNull()}\n", ConsoleViewContentType.LOG_INFO_OUTPUT)
             console.print("$k: ${v.firstOrNull()}\n", ConsoleViewContentType.LOG_INFO_OUTPUT)
         }
 
-        console.print("\n--- Body ---\n", ConsoleViewContentType.LOG_DEBUG_OUTPUT)
-        console.print(response.body().take(5000), ConsoleViewContentType.NORMAL_OUTPUT)
+        console.print("\n", ConsoleViewContentType.LOG_DEBUG_OUTPUT)
+        console.print(response.body(), ConsoleViewContentType.NORMAL_OUTPUT)
 
-        if (response.body().length > 5000) {
-            console.print("\n\n[Truncated...]", ConsoleViewContentType.LOG_WARNING_OUTPUT)
-        }
+        bodyConsole.print(response.body(), ConsoleViewContentType.NORMAL_OUTPUT)
     }
 
     override fun createWrapper() = HttpWrapperPanel(project)

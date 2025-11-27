@@ -6,12 +6,13 @@ import com.github.xepozz.call.base.api.LanguageTextExtractor
 import com.github.xepozz.call.base.api.Wrapper
 import com.github.xepozz.call.base.extractors.AdapterLanguageExtractor
 import com.github.xepozz.call.base.handlers.ExecutionState
+import com.github.xepozz.call.base.inlay.ui.createResultContainer
+import com.github.xepozz.call.base.inlay.ui.embedContainerIntoEditor
 import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
 import com.intellij.codeInsight.daemon.impl.InlayHintsPassFactoryInternal
 import com.intellij.codeInsight.hints.ChangeListener
 import com.intellij.codeInsight.hints.FactoryInlayHintsCollector
 import com.intellij.codeInsight.hints.ImmediateConfigurable
-import com.intellij.codeInsight.hints.InlayHintsCollector
 import com.intellij.codeInsight.hints.InlayHintsProvider
 import com.intellij.codeInsight.hints.InlayHintsSink
 import com.intellij.codeInsight.hints.NoSettings
@@ -19,39 +20,20 @@ import com.intellij.codeInsight.hints.SettingsKey
 import com.intellij.codeInsight.hints.presentation.InlayPresentation
 import com.intellij.codeInsight.hints.presentation.MouseButton
 import com.intellij.execution.process.ProcessEvent
-import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.process.ProcessListener
 import com.intellij.icons.AllIcons
-import com.intellij.openapi.Disposable
-import com.intellij.openapi.actionSystem.ActionManager
-import com.intellij.openapi.actionSystem.ActionToolbar
-import com.intellij.openapi.actionSystem.AnAction
-import com.intellij.openapi.actionSystem.AnActionEvent
-import com.intellij.openapi.actionSystem.DefaultActionGroup
-import com.intellij.openapi.actionSystem.toolbarLayout.ToolbarLayoutStrategy
 import com.intellij.openapi.application.invokeLater
 import com.intellij.openapi.editor.Editor
-import com.intellij.openapi.editor.ex.EditorEx
-import com.intellij.openapi.editor.impl.EditorEmbeddedComponentManager
-import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
-import com.intellij.ui.JBColor
 import com.intellij.ui.dsl.builder.panel
-import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
 import java.awt.Cursor
-import java.awt.Dimension
-import java.awt.FlowLayout
-import java.awt.datatransfer.StringSelection
 import java.util.concurrent.ConcurrentHashMap
-import javax.swing.BorderFactory
 import javax.swing.Icon
 import javax.swing.JPanel
-import javax.swing.OverlayLayout
-import javax.swing.SwingConstants
 
 /**
  * Unified InlayHintsProvider that uses the new extensible mechanism:
@@ -63,16 +45,6 @@ import javax.swing.SwingConstants
  */
 @Suppress("UnstableApiUsage")
 class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
-
-    private data class Session(
-        val container: JPanel?,
-        var wrapper: Wrapper?,
-        var state: ExecutionState = ExecutionState.IDLE,
-        var processHandler: ProcessHandler? = null,
-        var collapsed: Boolean = false,
-        val disposable: Disposable = Disposer.newDisposable("Call.Inlay.Session")
-    )
-
     // key: editorId + featureId + line
     private val sessions = ConcurrentHashMap<String, Session>()
 
@@ -90,7 +62,7 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
         editor: Editor,
         settings: NoSettings,
         sink: InlayHintsSink
-    ): InlayHintsCollector = object : FactoryInlayHintsCollector(editor) {
+    ) = object : FactoryInlayHintsCollector(editor) {
 
         // Pre-compute matches for the whole file once
         private val matchesByElement: Map<PsiElement, List<FeatureMatch>> = computeMatches(file)
@@ -272,10 +244,10 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
 
             // Execute and capture process lifecycle
             val sess = sessions[key] ?: return
-            feature.execute(match, wrapper, project) { ph ->
-                sess.processHandler = ph
-                // When process terminates, mark as FINISHED
-                ph?.addProcessListener(object : ProcessListener {
+            feature.execute(match, wrapper, project) { processHandler ->
+                sess.processHandler = processHandler
+
+                processHandler?.addProcessListener(object : ProcessListener {
                     override fun processTerminated(event: ProcessEvent) {
                         sess.state = ExecutionState.FINISHED
                         sess.processHandler = null
@@ -327,71 +299,5 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
     }
 }
 
-private fun createResultContainer(): JPanel {
-    val toolbar = createToolbar()
+fun makeKey(editor: Editor, featureId: String, line: Int): String = "${editor.hashCode()}_${featureId}_$line"
 
-    val container = JPanel(BorderLayout()).apply {
-        layout = OverlayLayout(this)
-        border = BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(JBColor.border(), 1),
-            JBUI.Borders.empty(4)
-        )
-        background = JBColor.background()
-        preferredSize = Dimension(700, 250)
-    }
-
-    val toolbarWrapper = JPanel(FlowLayout(FlowLayout.RIGHT, 5, 5)).apply {
-        isOpaque = false
-        alignmentX = 1.0f
-        alignmentY = 0.0f
-        add(toolbar.component)
-        toolbar.targetComponent = this
-    }
-    val contentPanel = JPanel(BorderLayout()).apply {
-        isOpaque = false
-        alignmentX = 1f
-        alignmentY = 1f
-    }
-    container.add(toolbarWrapper)
-    container.add(contentPanel)
-
-    return container
-}
-
-private fun embedContainerIntoEditor(editor: Editor, container:JPanel, offset: Int) {
-    val manager = EditorEmbeddedComponentManager.getInstance()
-    val properties = EditorEmbeddedComponentManager.Properties(
-        EditorEmbeddedComponentManager.ResizePolicy.any(),
-        null,
-        true,
-        false,
-        0,
-        offset
-    )
-
-    invokeLater {
-        manager.addComponent(editor as EditorEx, container, properties)
-    }
-}
-
-private fun createToolbar(): ActionToolbar {
-    val copyAction = object : AnAction("Copy", "Copy output", AllIcons.Actions.Copy) {
-        override fun actionPerformed(e: AnActionEvent) {
-            val content = "console.text"
-            CopyPasteManager.getInstance().setContents(StringSelection(content))
-        }
-    }
-
-    val actionGroup = DefaultActionGroup(copyAction)
-
-    val toolbar = ActionManager.getInstance()
-        .createActionToolbar("ConsoleInlay", actionGroup, false)
-        .apply {
-            layoutStrategy = ToolbarLayoutStrategy.AUTOLAYOUT_STRATEGY
-            orientation = SwingConstants.VERTICAL
-            component.isOpaque = false
-        }
-    return toolbar
-}
-
-private fun makeKey(editor: Editor, featureId: String, line: Int): String = "${editor.hashCode()}_${featureId}_$line"
