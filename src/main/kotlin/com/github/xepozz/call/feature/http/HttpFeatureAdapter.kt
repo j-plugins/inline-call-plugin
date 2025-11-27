@@ -4,7 +4,7 @@ import com.github.xepozz.call.base.api.ExtractedBlock
 import com.github.xepozz.call.base.api.FeatureGenerator
 import com.github.xepozz.call.base.api.FeatureMatch
 import com.github.xepozz.call.base.api.Wrapper
-import com.github.xepozz.call.base.handlers.ExecutionHandler
+import com.github.xepozz.call.base.util.RegexpMatcher
 import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.ui.ConsoleView
 import com.intellij.execution.ui.ConsoleViewContentType
@@ -25,11 +25,12 @@ import javax.swing.Icon
 /**
  * Feature adapter that delegates matching and execution to existing HttpExecutionHandler.
  */
-class HttpFeatureAdapter : FeatureGenerator, ExecutionHandler {
+class HttpFeatureAdapter : FeatureGenerator {
     override val id: String = "http"
-    override val pattern: Pattern = Pattern.compile("(https?://[\\w\\-._~:/?#\\[\\]@!\$&'()*+,;=%]+)")
     override val icon: Icon = AllIcons.General.Web
     override val tooltipPrefix: String = "Fetch"
+
+    val matcher = RegexpMatcher(Pattern.compile("(https?://[\\w\\-._~:/?#\\[\\]@!\$&'()*+,;=%]+)"))
 
     private val httpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(10))
@@ -37,7 +38,7 @@ class HttpFeatureAdapter : FeatureGenerator, ExecutionHandler {
         .build()
 
     override fun match(block: ExtractedBlock, project: Project): List<FeatureMatch> {
-        val matches = findMatches(block.text)
+        val matches = matcher.findMatches(block.text)
         val base = block.originalRange.startOffset
         return matches.map { m ->
             val startOriginal = base + block.mapping.toOriginal(m.offset)

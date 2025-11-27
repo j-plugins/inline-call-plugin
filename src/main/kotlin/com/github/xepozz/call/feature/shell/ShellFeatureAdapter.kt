@@ -4,7 +4,7 @@ import com.github.xepozz.call.base.api.ExtractedBlock
 import com.github.xepozz.call.base.api.FeatureGenerator
 import com.github.xepozz.call.base.api.FeatureMatch
 import com.github.xepozz.call.base.api.Wrapper
-import com.github.xepozz.call.base.handlers.ExecutionHandler
+import com.github.xepozz.call.base.util.RegexpMatcher
 import com.intellij.execution.configurations.GeneralCommandLine
 import com.intellij.execution.process.OSProcessHandler
 import com.intellij.execution.process.ProcessHandler
@@ -23,14 +23,15 @@ import javax.swing.Icon
 /**
  * Feature adapter that delegates matching and execution to existing ShellExecutionHandler.
  */
-class ShellFeatureAdapter : FeatureGenerator, ExecutionHandler {
+class ShellFeatureAdapter : FeatureGenerator {
     override val id: String = "shell"
-    override val pattern: Pattern = Pattern.compile("shell:\\s*(.+)")
     override val icon: Icon = AllIcons.Actions.Execute
     override val tooltipPrefix: String = "Run"
 
+    val matcher = RegexpMatcher(Pattern.compile("shell:\\s*(.+)"))
+
     override fun match(block: ExtractedBlock, project: Project): List<FeatureMatch> {
-        val matches = findMatches(block.text)
+        val matches = matcher.findMatches(block.text)
         val base = block.originalRange.startOffset
         return matches.map { m ->
             val startOriginal = base + block.mapping.toOriginal(m.offset)
