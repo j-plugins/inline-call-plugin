@@ -1,13 +1,12 @@
 <idea-plugin>
     <extensions defaultExtensionNs="com.intellij">
         <codeInsight.inlayProvider
-                language="XML"
+                language="yaml"
                 implementationClass="com.github.xepozz.call.base.inlay.ExecutionInlayProvider"/>
     </extensions>
 
     <extensions defaultExtensionNs="com.github.xepozz.call">
         <languageTextExtractor
-                order="last"
-                implementation="com.github.xepozz.call.language.xml.XmlLanguageExtractor"/>
+                implementation="com.github.xepozz.call.language.yaml.YamlLanguageExtractor"/>
     </extensions>
 </idea-plugin>

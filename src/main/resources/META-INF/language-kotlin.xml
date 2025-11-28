@@ -1,4 +1,10 @@
 <idea-plugin>
+    <extensions defaultExtensionNs="com.intellij">
+        <codeInsight.inlayProvider
+                language="Kotlin"
+                implementationClass="com.github.xepozz.call.base.inlay.ExecutionInlayProvider"/>
+    </extensions>
+
     <extensions defaultExtensionNs="com.github.xepozz.call">
         <languageTextExtractor
                 order="last"
