@@ -25,7 +25,6 @@ import com.intellij.icons.AllIcons
 import com.intellij.openapi.application.invokeLater
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.util.Disposer
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
 import com.intellij.ui.dsl.builder.panel
@@ -145,7 +144,6 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                     var runPres: InlayPresentation = factory.withTooltip(tooltip, withIcon)
                     runPres = factory.withCursorOnHover(runPres, Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
                     runPres = factory.onClick(runPres, MouseButton.Left) { _, _ ->
-                        if (project == null) return@onClick
                         val featureGenerator = feature ?: return@onClick
                         run(editor, project, featureGenerator, match, key, lineEndOffset)
                     }
@@ -161,7 +159,6 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                     var rerunPres: InlayPresentation = factory.withTooltip(rerunTooltip, withIcon)
                     rerunPres = factory.withCursorOnHover(rerunPres, Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
                     rerunPres = factory.onClick(rerunPres, MouseButton.Left) { _, _ ->
-                        if (project == null) return@onClick
                         val feat = feature ?: return@onClick
                         run(editor, project, feat, match, key, lineEndOffset)
                     }
@@ -221,10 +218,6 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                     container.remove(oldWrapper.component)
                 }
                 mountWrapperIntoContainer(container, wrapper)
-                try {
-                    oldWrapper?.dispose()
-                } catch (_: Throwable) {
-                }
                 current.wrapper = wrapper
                 current.state = ExecutionState.RUNNING
             }
@@ -268,8 +261,6 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             invokeLater {
                 session.container?.parent?.remove(session.container)
             }
-            try { session.wrapper?.dispose() } catch (_: Throwable) { }
-            Disposer.dispose(session.disposable)
         }
 
         private fun toggleCollapse(session: Session) {

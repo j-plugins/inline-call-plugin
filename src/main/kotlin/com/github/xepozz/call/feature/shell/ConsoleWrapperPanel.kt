@@ -32,7 +32,4 @@ class ConsoleWrapperPanel(project: Project) : Wrapper {
         add(console.component)
     }
 
-    override fun dispose() {
-        console.dispose()
-    }
 }

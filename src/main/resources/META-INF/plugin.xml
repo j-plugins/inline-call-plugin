@@ -12,7 +12,6 @@
     <resource-bundle>messages.MyBundle</resource-bundle>
 
     <extensions defaultExtensionNs="com.intellij">
-        <!-- New unified inlay provider based on the extensible mechanism -->
         <codeInsight.inlayProvider
                 language="HTML"
                 implementationClass="com.github.xepozz.call.base.inlay.ExecutionInlayProvider"/>
@@ -29,15 +28,9 @@
                 interface="com.github.xepozz.call.base.api.FeatureGenerator"
                 area="IDEA_PROJECT"
                 name="feature"/>
-        <extensionPoint
-                dynamic="true"
-                interface="com.github.xepozz.call.base.api.WrapperFactory"
-                area="IDEA_PROJECT"
-                name="wrapperFactory"/>
     </extensionPoints>
 
     <extensions defaultExtensionNs="com.github.xepozz.call">
-        <!-- Default implementations for the new architecture (Phase 1) -->
         <languageTextExtractor
                 order="last"
                 implementation="com.github.xepozz.call.base.extractors.AdapterLanguageExtractor"/>

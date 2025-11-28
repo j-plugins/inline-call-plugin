@@ -21,10 +21,4 @@ class HttpWrapperPanel(project: Project) : Wrapper {
         addTab("Body", bodyConsole.component)
 //        addTab("Preview", bodyConsole.component)
     }
-
-    override fun dispose() {
-        bodyConsole.dispose()
-        headersConsole.dispose()
-        console.dispose()
-    }
 }
