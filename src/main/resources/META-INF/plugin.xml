@@ -2,10 +2,9 @@
 <idea-plugin>
     <id>com.github.xepozz.call</id>
     <name>Call</name>
-    <vendor>xepozz</vendor>
+    <vendor email="xepozz@list.ru" url="https://github.com/xepozz">Dmitrii Derepko (@xepozz)</vendor>
 
     <depends>com.intellij.modules.platform</depends>
-    <!-- Optional Kotlin dependency: used only to register Kotlin-specific extensions in kotlin.xml -->
     <depends optional="true" config-file="language-kotlin.xml">org.jetbrains.kotlin</depends>
     <depends optional="true" config-file="language-xml.xml">com.intellij.modules.xml</depends>
 

@@ -1,5 +1,6 @@
 package com.github.xepozz.call.base.inlay
 
+import com.github.xepozz.call.base.SessionStorage
 import com.github.xepozz.call.base.api.FeatureGenerator
 import com.github.xepozz.call.base.api.FeatureMatch
 import com.github.xepozz.call.base.api.LanguageTextExtractor
@@ -30,15 +31,11 @@ import com.intellij.psi.PsiFile
 import com.intellij.ui.dsl.builder.panel
 import java.awt.BorderLayout
 import java.awt.Cursor
-import java.util.concurrent.ConcurrentHashMap
 import javax.swing.Icon
 import javax.swing.JPanel
 
 @Suppress("UnstableApiUsage")
 class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
-    // key: editorId + featureId + line
-    private val sessions = ConcurrentHashMap<String, Session>()
-
     override val key: SettingsKey<NoSettings> = SettingsKey("call.implementation.inlay")
     override val name: String = "Call (Unified)"
     override val previewText: String = "// shell: echo hello\n// https://api.example.com"
@@ -54,6 +51,7 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
         settings: NoSettings,
         sink: InlayHintsSink
     ) = object : FactoryInlayHintsCollector(editor) {
+        val sessionStorage = SessionStorage.getInstance(file.project)
 
         // Pre-compute matches for the whole file once
         private val matchesByElement: Map<PsiElement, List<FeatureMatch>> = computeMatches(file)
@@ -62,7 +60,7 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             val matches = matchesByElement[element] ?: return true
             if (matches.isEmpty()) return true
 
-            val project = editor.project ?: return true
+            val project = file.project
 
             matches.forEach { m ->
                 val offset = m.originalRange.startOffset
@@ -110,7 +108,7 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             val line = editor.document.getLineNumber(start)
             val lineEndOffset = editor.document.getLineEndOffset(line)
             val key = makeKey(editor, match.featureId, line)
-            val session = sessions[key]
+            val session = sessionStorage.getSession(key)
 
             val parts = mutableListOf<InlayPresentation>()
 
@@ -194,7 +192,7 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             lineEndOffset: Int,
         ) {
             // Ensure wrapper exists and mounted
-            var current = sessions[key]
+            var current = sessionStorage.getSession(key)
             val wrapper = feature.createWrapper()
 
             if (current?.container == null) {
@@ -204,13 +202,10 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                     mountWrapperIntoContainer(container, wrapper)
 
                     current = Session(container, wrapper)
-                    sessions[key] = current
                 } catch (_: Throwable) {
-                    // If embedding fails, still execute without container
                     current = Session(null, wrapper)
-                    sessions[key] = current
                 }
-                current.state = ExecutionState.RUNNING
+                sessionStorage.putSession(key, current)
             } else {
                 // Replace previous wrapper in the existing container
                 val container = current.container
@@ -220,20 +215,20 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                 }
                 mountWrapperIntoContainer(container, wrapper)
                 current.wrapper = wrapper
-                current.state = ExecutionState.RUNNING
             }
+            current.state = ExecutionState.RUNNING
 
             refreshInlays(editor)
 
             // Execute and capture process lifecycle
-            val sess = sessions[key] ?: return
+            val session = current
             feature.execute(match, wrapper, project) { processHandler ->
-                sess.processHandler = processHandler
+                session.processHandler = processHandler
 
                 processHandler?.addProcessListener(object : ProcessListener {
                     override fun processTerminated(event: ProcessEvent) {
-                        sess.state = ExecutionState.FINISHED
-                        sess.processHandler = null
+                        session.state = ExecutionState.FINISHED
+                        session.processHandler = null
                         refreshInlays(editor)
                     }
                 })
@@ -249,14 +244,14 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
         }
 
         private fun stop(key: String) {
-            val session = sessions[key] ?: return
+            val session = sessionStorage.getSession(key) ?: return
             session.processHandler?.destroyProcess()
             session.processHandler = null
             session.state = ExecutionState.FINISHED
         }
 
         private fun delete(key: String) {
-            val session = sessions.remove(key) ?: return
+            val session = sessionStorage.remove(key) ?: return
             try { session.processHandler?.destroyProcess() } catch (_: Throwable) { }
             session.processHandler = null
             invokeLater {

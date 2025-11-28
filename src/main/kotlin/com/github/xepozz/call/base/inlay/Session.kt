@@ -5,7 +5,7 @@ import com.github.xepozz.call.base.handlers.ExecutionState
 import com.intellij.execution.process.ProcessHandler
 import javax.swing.JPanel
 
-internal data class Session(
+data class Session(
     val container: JPanel?,
     var wrapper: Wrapper?,
     var state: ExecutionState = ExecutionState.IDLE,
