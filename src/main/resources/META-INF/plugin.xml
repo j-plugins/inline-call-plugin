@@ -1,6 +1,6 @@
 <!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
 <idea-plugin>
-    <id>com.github.xepozz.call</id>
+    <id>com.github.xepozz.inline_call</id>
     <name>Inline Call</name>
     <vendor email="xepozz@list.ru" url="https://github.com/xepozz">Dmitrii Derepko (@xepozz)</vendor>
 
@@ -22,21 +22,21 @@
     <extensionPoints>
         <extensionPoint
                 dynamic="true"
-                interface="com.github.xepozz.call.base.api.LanguageTextExtractor"
+                interface="com.github.xepozz.inline_call.base.api.LanguageTextExtractor"
                 area="IDEA_PROJECT"
                 name="languageTextExtractor"/>
         <extensionPoint
                 dynamic="true"
-                interface="com.github.xepozz.call.base.api.FeatureGenerator"
+                interface="com.github.xepozz.inline_call.base.api.FeatureGenerator"
                 area="IDEA_PROJECT"
                 name="feature"/>
     </extensionPoints>
 
-    <extensions defaultExtensionNs="com.github.xepozz.call">
+    <extensions defaultExtensionNs="com.github.xepozz.inline_call">
         <languageTextExtractor
                 order="last"
-                implementation="com.github.xepozz.call.base.extractors.AdapterLanguageExtractor"/>
-        <feature implementation="com.github.xepozz.call.feature.shell.ShellFeatureAdapter"/>
-        <feature implementation="com.github.xepozz.call.feature.http.HttpFeatureAdapter"/>
+                implementation="com.github.xepozz.inline_call.base.extractors.AdapterLanguageExtractor"/>
+        <feature implementation="com.github.xepozz.inline_call.feature.shell.ShellFeatureAdapter"/>
+        <feature implementation="com.github.xepozz.inline_call.feature.http.HttpFeatureAdapter"/>
     </extensions>
 </idea-plugin>

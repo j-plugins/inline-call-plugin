@@ -1,6 +1,6 @@
 # Call Plugin
 
-![Build](https://github.com/xepozz/call-plugin/workflows/Build/badge.svg)
+![Build](https://github.com/j-plugins/inline-call-plugin/workflows/Build/badge.svg)
 [![Version](https://img.shields.io/jetbrains/plugin/v/MARKETPLACE_ID.svg)](https://plugins.jetbrains.com/plugin/MARKETPLACE_ID)
 [![Downloads](https://img.shields.io/jetbrains/plugin/d/MARKETPLACE_ID.svg)](https://plugins.jetbrains.com/plugin/MARKETPLACE_ID)
 
@@ -19,7 +19,7 @@
 
 <!-- Plugin description -->
 
-[Github](https://github.com/j-plugins/call-plugin) | [Telegram](https://t.me/jb_plugins/50) | [Donation](https://github.com/xepozz/xepozz?tab=readme-ov-file#become-a-sponsor)
+[Github](https://github.com/j-plugins/inline-call-plugin) | [Telegram](https://t.me/jb_plugins/50) | [Donation](https://github.com/xepozz/xepozz?tab=readme-ov-file#become-a-sponsor)
 
 ## Inline Call
 

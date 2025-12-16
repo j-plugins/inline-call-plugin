@@ -2,12 +2,12 @@
     <extensions defaultExtensionNs="com.intellij">
         <codeInsight.inlayProvider
                 language="Kotlin"
-                implementationClass="com.github.xepozz.call.base.inlay.ExecutionInlayProvider"/>
+                implementationClass="com.github.xepozz.inline_call.base.inlay.ExecutionInlayProvider"/>
     </extensions>
 
-    <extensions defaultExtensionNs="com.github.xepozz.call">
+    <extensions defaultExtensionNs="com.github.xepozz.inline_call">
         <languageTextExtractor
                 order="last"
-                implementation="com.github.xepozz.call.language.kotlin.KotlinLanguageExtractor"/>
+                implementation="com.github.xepozz.inline_call.language.kotlin.KotlinLanguageExtractor"/>
     </extensions>
 </idea-plugin>

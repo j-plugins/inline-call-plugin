@@ -1,0 +1,100 @@
+package com.github.xepozz.inline_call.feature.shell
+
+import com.github.xepozz.inline_call.base.api.ExtractedBlock
+import com.github.xepozz.inline_call.base.api.FeatureGenerator
+import com.github.xepozz.inline_call.base.api.FeatureMatch
+import com.github.xepozz.inline_call.base.util.RegexpMatcher
+import com.intellij.execution.configurations.GeneralCommandLine
+import com.intellij.execution.process.OSProcessHandler
+import com.intellij.execution.process.ProcessHandler
+import com.intellij.execution.process.ProcessTerminatedListener
+import com.intellij.execution.ui.ConsoleViewContentType
+import com.intellij.icons.AllIcons
+import com.intellij.openapi.application.invokeLater
+import com.intellij.openapi.progress.ProgressIndicator
+import com.intellij.openapi.progress.ProgressManager
+import com.intellij.openapi.progress.Task
+import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.TextRange
+import java.util.regex.Pattern
+import javax.swing.Icon
+
+/**
+ * Feature adapter that delegates matching and execution to existing ShellExecutionHandler.
+ */
+class ShellFeatureAdapter(val project: Project) : FeatureGenerator<ConsoleWrapperPanel> {
+    override val id: String = "shell"
+    override val icon: Icon = AllIcons.Actions.Execute
+    override val tooltipPrefix: String = "Run"
+
+    val matcher = RegexpMatcher(Pattern.compile("shell:\\s*(.+)"))
+
+    override fun match(block: ExtractedBlock, project: Project): List<FeatureMatch> {
+        val matches = matcher.findMatches(block.text)
+        val base = block.originalRange.startOffset
+        return matches.map { m ->
+            val startOriginal = base + block.mapping.toOriginal(m.offset)
+            val endOriginal = startOriginal + m.value.length
+            FeatureMatch(
+                featureId = id,
+                block = block,
+                value = m.value,
+                normalizedRange = TextRange(m.offset, m.offset + m.value.length),
+                originalRange = TextRange(startOriginal, endOriginal),
+            )
+        }
+    }
+
+    override fun execute(
+        match: FeatureMatch,
+        wrapper: ConsoleWrapperPanel,
+        project: Project,
+        onProcessCreated: (ProcessHandler?) -> Unit
+    ) {
+        val value = match.value
+        val console = wrapper.console
+        // Run with progress indicator similar to HTTP feature
+        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Executing shell command", true) {
+            override fun run(indicator: ProgressIndicator) {
+                indicator.isIndeterminate = true
+                indicator.text = "Running shell command"
+                indicator.text2 = value
+
+                val commandLine = GeneralCommandLine("/bin/sh", "-c", value)
+                    .withRedirectErrorStream(true)
+                val processHandler = OSProcessHandler(commandLine)
+                ProcessTerminatedListener.attach(processHandler)
+                console.attachToProcess(processHandler)
+                onProcessCreated(processHandler)
+
+                try {
+                    processHandler.startNotify()
+
+                    // Keep progress indicator alive until process finishes or user cancels
+                    while (!processHandler.isProcessTerminated) {
+                        if (indicator.isCanceled) {
+                            // User canceled via progress UI; destroy the process
+                            processHandler.destroyProcess()
+                            break
+                        }
+                        // Slight sleep to avoid busy waiting; progress stays visible
+                        try {
+                            Thread.sleep(50)
+                        } catch (_: InterruptedException) {
+                            // If interrupted, attempt to stop process and exit
+                            processHandler.destroyProcess()
+                            break
+                        }
+                    }
+                } catch (e: Exception) {
+                    invokeLater {
+                        onProcessCreated(null)
+                        console.print("\n[Error: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
+                    }
+                }
+            }
+        })
+    }
+
+    override fun createWrapper() = ConsoleWrapperPanel(project)
+}

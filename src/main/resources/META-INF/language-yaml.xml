@@ -2,11 +2,11 @@
     <extensions defaultExtensionNs="com.intellij">
         <codeInsight.inlayProvider
                 language="yaml"
-                implementationClass="com.github.xepozz.call.base.inlay.ExecutionInlayProvider"/>
+                implementationClass="com.github.xepozz.inline_call.base.inlay.ExecutionInlayProvider"/>
     </extensions>
 
-    <extensions defaultExtensionNs="com.github.xepozz.call">
+    <extensions defaultExtensionNs="com.github.xepozz.inline_call">
         <languageTextExtractor
-                implementation="com.github.xepozz.call.language.yaml.YamlLanguageExtractor"/>
+                implementation="com.github.xepozz.inline_call.language.yaml.YamlLanguageExtractor"/>
     </extensions>
 </idea-plugin>
