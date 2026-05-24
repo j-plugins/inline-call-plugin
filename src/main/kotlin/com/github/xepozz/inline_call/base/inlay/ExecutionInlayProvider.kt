@@ -24,7 +24,7 @@ import com.intellij.codeInsight.hints.presentation.MouseButton
 import com.intellij.execution.process.ProcessEvent
 import com.intellij.execution.process.ProcessListener
 import com.intellij.icons.AllIcons
-import com.intellij.openapi.application.invokeLater
+import com.intellij.openapi.application.EDT
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
@@ -33,6 +33,12 @@ import com.intellij.psi.PsiFile
 import com.intellij.psi.SmartPointerManager
 import com.intellij.psi.SmartPsiElementPointer
 import com.intellij.ui.dsl.builder.panel
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineName
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.awt.BorderLayout
 import java.awt.Cursor
 import java.util.IdentityHashMap
@@ -62,20 +68,12 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
         private val matchesByElement: Map<PsiElement, List<FeatureMatch>> = computeMatches(file)
 
         // Pre-computed occurrence index per FeatureMatch (identity-keyed).
-        // Index is global per (featureId, valueHash) across the whole file,
-        // ordered by ascending originalRange.startOffset.
         private val occurrenceIndex: Map<FeatureMatch, Int> = computeOccurrenceIndex(matchesByElement)
 
-        // virtualFileUrl is captured once — file is constant for the
-        // duration of this collector and we don't want to recompute on
-        // every collect() call.
         private val virtualFile: VirtualFile? = file.virtualFile
         private val virtualFileUrl: String? = virtualFile?.url
 
         init {
-            // Stale-key sweep: any session for this file whose key no
-            // longer corresponds to a current match is evicted (process
-            // terminated, panel disposed). Done once per inlay pass.
             virtualFileUrl?.let { url ->
                 val validKeys = buildValidKeysFor(url)
                 val evicted = sessionStorage.evictStale(url, validKeys)
@@ -84,7 +82,7 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                     session.processHandler = null
                     val container = session.container
                     if (container != null) {
-                        invokeLater {
+                        sessionStorage.cs.launch(Dispatchers.EDT) {
                             container.parent?.remove(container)
                         }
                     }
@@ -133,11 +131,6 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             return matches
         }
 
-        /**
-         * Build per-FeatureMatch occurrence indices (global across the
-         * whole file, grouped by `(featureId, valueHash)`, ordered by
-         * ascending `originalRange.startOffset`).
-         */
         private fun computeOccurrenceIndex(
             matchesByElement: Map<PsiElement, List<FeatureMatch>>
         ): Map<FeatureMatch, Int> {
@@ -184,7 +177,6 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
 
             val parts = mutableListOf<InlayPresentation>()
 
-            // Collapse/Expand appears when wrapper (container) is mounted
             if (session?.container != null) {
                 val collapseIcon = if (session.collapsed) AllIcons.General.ArrowRight else AllIcons.General.ArrowDown
                 val collapseTooltip = if (session.collapsed) "Expand" else "Collapse"
@@ -196,12 +188,10 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
 
             when (session?.state ?: ExecutionState.IDLE) {
                 ExecutionState.RUNNING -> {
-                    // Stop button
                     parts += clickableIcon(AllIcons.Actions.Suspend, "Stop") {
                         stop(key)
                         refreshInlays(editor)
                     }
-                    // Delete button — reset state to never-run and remove UI
                     parts += clickableIcon(AllIcons.General.Remove, "Delete") {
                         delete(key)
                         refreshInlays(editor)
@@ -209,7 +199,6 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                 }
 
                 ExecutionState.IDLE -> {
-                    // Initial Run button
                     val runText = factory.inset(factory.roundWithBackground(factory.text(" Run ")), left = 2, right = 2)
                     val withIcon = icon?.let { factory.seq(factory.icon(it), runText) } ?: runText
                     var runPres: InlayPresentation = factory.withTooltip(tooltip, withIcon)
@@ -222,7 +211,6 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                 }
 
                 ExecutionState.FINISHED -> {
-                    // After first launch: show Rerun icon + "Run" text
                     val rerunIcon = AllIcons.Actions.Rerun
                     val rerunTooltip = "Rerun: ${match.value}"
                     val runText = factory.inset(factory.roundWithBackground(factory.text(" Run ")), left = 2, right = 2)
@@ -235,7 +223,6 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                     }
                     parts += rerunPres
 
-                    // Also allow to delete/reset after successful completion
                     parts += clickableIcon(AllIcons.General.Remove, "Delete") {
                         delete(key)
                         refreshInlays(editor)
@@ -264,8 +251,21 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             lineEndOffset: Int,
             element: PsiElement,
         ) {
-            // Ensure wrapper exists and mounted
-            var current = sessionStorage.getSession(key)
+            val newJob = sessionStorage.cs.launch(CoroutineName("inline-call:$key")) {
+                runImpl(editor, project, feature, match, key, lineEndOffset, element)
+            }
+            sessionStorage.replaceJob(key, newJob)?.cancel()
+        }
+
+        private suspend fun <TWrapper : Wrapper> runImpl(
+            editor: Editor,
+            project: Project,
+            feature: FeatureGenerator<TWrapper>,
+            match: FeatureMatch,
+            key: String,
+            lineEndOffset: Int,
+            element: PsiElement,
+        ) {
             val wrapper = feature.createWrapper()
             val vfUrl = virtualFileUrl ?: ""
             val occ = occurrenceIndex[match] ?: 0
@@ -274,18 +274,24 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                 if (element.isValid) SmartPointerManager.getInstance(project).createSmartPsiElementPointer(element)
                 else null
 
-            // The container may be null because (a) it was never mounted,
-            // (b) the previous editor was disposed on file close. In the
-            // latter case container is non-null but its parent is null —
-            // rebuild and re-mount on the live editor.
-            val needsContainer = current?.container == null || current.container?.parent == null
+            // Phase 1: ensure container exists and is mounted; replace wrapper.
+            val session = withContext(Dispatchers.EDT) {
+                var current = sessionStorage.getSession(key)
 
-            if (needsContainer) {
-                try {
-                    val container = createResultContainer()
-                    embedContainerIntoEditor(editor, container, lineEndOffset)
-                    mountWrapperIntoContainer(container, wrapper)
+                // Container may be null because (a) never mounted, or (b) the
+                // previous editor was disposed on file close (container exists
+                // but its parent is null — rebuild and re-mount).
+                val needsContainer = current?.container == null || current.container?.parent == null
 
+                if (needsContainer) {
+                    val container = try {
+                        val c = createResultContainer()
+                        embedContainerIntoEditor(editor, c, lineEndOffset)
+                        mountWrapperIntoContainer(c, wrapper)
+                        c
+                    } catch (_: Throwable) {
+                        null
+                    }
                     if (current == null) {
                         current = Session(
                             virtualFileUrl = vfUrl,
@@ -301,63 +307,63 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                         current.wrapper = wrapper
                         if (current.anchor == null) current.anchor = anchor
                     }
-                } catch (_: Throwable) {
-                    if (current == null) {
-                        current = Session(
-                            virtualFileUrl = vfUrl,
-                            featureId = match.featureId,
-                            valueHash = valueHash,
-                            occurrenceIndex = occ,
-                            anchor = anchor,
-                            container = null,
-                            wrapper = wrapper,
-                        )
-                    } else {
-                        current.wrapper = wrapper
-                        if (current.anchor == null) current.anchor = anchor
+                    sessionStorage.putSession(key, current)
+                } else {
+                    val container = current!!.container!!
+                    val oldWrapper = current.wrapper
+                    if (oldWrapper != null) {
+                        container.remove(oldWrapper.component)
                     }
+                    mountWrapperIntoContainer(container, wrapper)
+                    current.wrapper = wrapper
+                    if (current.anchor == null) current.anchor = anchor
                 }
-                sessionStorage.putSession(key, current)
-            } else {
-                // Replace previous wrapper in the existing container
-                val container = current.container!!
-                val oldWrapper = current.wrapper
-                if (oldWrapper != null) {
-                    container.remove(oldWrapper.component)
-                }
-                mountWrapperIntoContainer(container, wrapper)
-                current.wrapper = wrapper
-                if (current.anchor == null) current.anchor = anchor
+                current.state = ExecutionState.RUNNING
+                refreshInlaysOnEdt(editor)
+                current
             }
-            current.state = ExecutionState.RUNNING
 
-            refreshInlays(editor)
+            // Phase 2: execute. feature.execute manages its own dispatcher hops.
+            val handler = feature.execute(match, wrapper, project)
+            session.processHandler = handler
 
-            // Execute and capture process lifecycle
-            val session = current
-            feature.execute(match, wrapper, project) { processHandler ->
-                session.processHandler = processHandler
+            if (handler == null) {
+                withContext(NonCancellable + Dispatchers.EDT) {
+                    session.state = ExecutionState.FINISHED
+                    refreshInlaysOnEdt(editor)
+                }
+                return
+            }
 
-                processHandler?.addProcessListener(object : ProcessListener {
-                    override fun processTerminated(event: ProcessEvent) {
-                        session.state = ExecutionState.FINISHED
-                        session.processHandler = null
-                        refreshInlays(editor)
-                    }
-                })
+            // Phase 3: bridge ProcessListener -> CompletableDeferred so the
+            // coroutine awaits termination without blocking a thread.
+            val done = CompletableDeferred<Unit>()
+            handler.addProcessListener(object : ProcessListener {
+                override fun processTerminated(event: ProcessEvent) {
+                    done.complete(Unit)
+                }
+            })
+            try {
+                done.await()
+            } finally {
+                withContext(NonCancellable + Dispatchers.EDT) {
+                    session.processHandler = null
+                    session.state = ExecutionState.FINISHED
+                    refreshInlaysOnEdt(editor)
+                }
             }
         }
 
         private fun mountWrapperIntoContainer(container: JPanel, wrapper: Wrapper) {
-            invokeLater {
-                container.add(wrapper.component, BorderLayout.CENTER)
-                container.revalidate()
-                container.repaint()
-            }
+            // Caller is expected to already be on the EDT.
+            container.add(wrapper.component, BorderLayout.CENTER)
+            container.revalidate()
+            container.repaint()
         }
 
         private fun stop(key: String) {
             val session = sessionStorage.getSession(key) ?: return
+            session.job?.cancel()
             session.processHandler?.destroyProcess()
             session.processHandler = null
             session.state = ExecutionState.FINISHED
@@ -367,7 +373,7 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             val session = sessionStorage.remove(key) ?: return
             try { session.processHandler?.destroyProcess() } catch (_: Throwable) { }
             session.processHandler = null
-            invokeLater {
+            sessionStorage.cs.launch(Dispatchers.EDT) {
                 session.container?.parent?.remove(session.container)
             }
         }
@@ -375,14 +381,24 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
         private fun toggleCollapse(session: Session) {
             session.collapsed = !session.collapsed
             val visible = !session.collapsed
-            invokeLater { session.container?.isVisible = visible }
+            sessionStorage.cs.launch(Dispatchers.EDT) {
+                session.container?.isVisible = visible
+            }
         }
 
         private fun refreshInlays(editor: Editor) {
-            invokeLater {
+            val project = editor.project ?: return
+            sessionStorage.cs.launch(Dispatchers.EDT) {
                 InlayHintsPassFactoryInternal.forceHintsUpdateOnNextPass()
-                DaemonCodeAnalyzer.getInstance(editor.project ?: return@invokeLater).restart()
+                DaemonCodeAnalyzer.getInstance(project).restart()
             }
+        }
+
+        // Same as refreshInlays but assumes caller is already on the EDT.
+        private fun refreshInlaysOnEdt(editor: Editor) {
+            val project = editor.project ?: return
+            InlayHintsPassFactoryInternal.forceHintsUpdateOnNextPass()
+            DaemonCodeAnalyzer.getInstance(project).restart()
         }
     }
 }
@@ -395,4 +411,3 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
  */
 private fun legacyFallbackKey(editor: Editor, match: FeatureMatch, line: Int): String =
     "ed=${editor.hashCode()}::${match.featureId}::${SessionStorage.hashValue(match.value)}#L${line}"
-

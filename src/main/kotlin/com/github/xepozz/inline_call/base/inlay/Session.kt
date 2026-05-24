@@ -6,6 +6,7 @@ import com.intellij.execution.process.ProcessHandler
 import com.intellij.openapi.application.ReadAction
 import com.intellij.psi.PsiElement
 import com.intellij.psi.SmartPsiElementPointer
+import kotlinx.coroutines.Job
 import javax.swing.JPanel
 
 /**
@@ -15,6 +16,9 @@ import javax.swing.JPanel
  *
  * Mutable fields are `@Volatile` because the lifecycle listeners (EDT) and
  * `ProcessHandler` callbacks (worker threads) write concurrently.
+ *
+ * [job] is the optional coroutine running the current execution; it is
+ * cancelled when the session is removed from storage or evicted.
  */
 class Session(
     val virtualFileUrl: String,
@@ -27,6 +31,7 @@ class Session(
     @Volatile var state: ExecutionState = ExecutionState.IDLE,
     @Volatile var processHandler: ProcessHandler? = null,
     @Volatile var collapsed: Boolean = false,
+    @Volatile var job: Job? = null,
 ) {
     /**
      * Whether the source anchor (typically a `PsiComment`) still exists and

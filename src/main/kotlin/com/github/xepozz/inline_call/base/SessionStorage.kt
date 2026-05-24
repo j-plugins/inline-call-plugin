@@ -4,10 +4,11 @@ import com.github.xepozz.inline_call.base.api.FeatureMatch
 import com.github.xepozz.inline_call.base.handlers.ExecutionState
 import com.github.xepozz.inline_call.base.inlay.Session
 import com.intellij.openapi.Disposable
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -28,9 +29,13 @@ import java.util.concurrent.ConcurrentHashMap
  * `com.github.xepozz.inline_call.base.lifecycle`, all of which use this
  * service as their `Disposable` parent so registration is dropped on
  * project close.
+ *
+ * [cs] is the project-scoped service coroutine scope provided by the
+ * platform; long-running per-session jobs are launched from it and
+ * cancelled via [remove] / [Session.job] or [dispose].
  */
 @Service(Service.Level.PROJECT)
-class SessionStorage(val project: Project) : Disposable {
+class SessionStorage(val project: Project, val cs: CoroutineScope) : Disposable {
     private val sessions = ConcurrentHashMap<String, Session>()
 
     fun getSession(key: String): Session? = sessions[key]
@@ -39,7 +44,19 @@ class SessionStorage(val project: Project) : Disposable {
         sessions[key] = session
     }
 
-    fun remove(key: String): Session? = sessions.remove(key)
+    fun remove(key: String): Session? = sessions.remove(key)?.also { it.job?.cancel() }
+
+    /**
+     * Atomically store [job] on the session for [key] and return the
+     * previously stored job (if any) so the caller can cancel it before
+     * launching anew. Returns `null` if no session exists for [key] yet.
+     */
+    fun replaceJob(key: String, job: Job): Job? {
+        val s = sessions[key] ?: return null
+        val prev = s.job
+        s.job = job
+        return prev
+    }
 
     /** Snapshot of every (key, session) for inspection by listeners. */
     fun snapshot(): List<Pair<String, Session>> = sessions.entries.map { it.key to it.value }
@@ -73,6 +90,7 @@ class SessionStorage(val project: Project) : Disposable {
             val (k, v) = it.next()
             if (v.virtualFileUrl == url && k !in validKeys) {
                 toRemove += v
+                v.job?.cancel()
                 it.remove()
             }
         }
@@ -80,13 +98,17 @@ class SessionStorage(val project: Project) : Disposable {
     }
 
     override fun dispose() {
-        // Last-resort cleanup: terminate every running process so the
-        // OS doesn't inherit them when the project window closes.
+        // Last-resort cleanup: cancel coroutines and terminate every
+        // running process so the OS doesn't inherit them when the
+        // project window closes.
         sessions.values.forEach { session ->
+            try {
+                session.job?.cancel()
+            } catch (_: Throwable) {
+            }
             try {
                 session.processHandler?.destroyProcess()
             } catch (_: Throwable) {
-                // Ignore — we're shutting down.
             }
             session.processHandler = null
             session.state = ExecutionState.FINISHED
