@@ -60,8 +60,6 @@ class HttpFeatureAdapter(val project: Project) : FeatureGenerator<HttpWrapperPan
     ) {
         val value = match.value
         val console = wrapper.console
-        val bodyConsole = wrapper.bodyConsole
-        val headersConsole = wrapper.headersConsole
 
         console.print("GET $value\n", ConsoleViewContentType.SYSTEM_OUTPUT)
         console.print("Connecting...\n\n", ConsoleViewContentType.LOG_INFO_OUTPUT)
@@ -114,28 +112,20 @@ class HttpFeatureAdapter(val project: Project) : FeatureGenerator<HttpWrapperPan
                     handler.complete(-1)
                 } else if (response != null) {
                     invokeLater {
-                        printResponse(console, headersConsole, bodyConsole, response)
+                        printResponse(console, response)
                     }
                     handler.complete(0)
                 }
             }
     }
 
-    private fun printResponse(
-        console: ConsoleView,
-        headersConsole: ConsoleView,
-        bodyConsole: ConsoleView,
-        response: HttpResponse<String>,
-    ) {
+    private fun printResponse(console: ConsoleView, response: HttpResponse<String>) {
         response.headers().map().entries.take(10).forEach { (k, v) ->
-            headersConsole.print("$k: ${v.firstOrNull()}\n", ConsoleViewContentType.LOG_INFO_OUTPUT)
             console.print("$k: ${v.firstOrNull()}\n", ConsoleViewContentType.LOG_INFO_OUTPUT)
         }
 
         console.print("\n", ConsoleViewContentType.LOG_DEBUG_OUTPUT)
         console.print(response.body(), ConsoleViewContentType.NORMAL_OUTPUT)
-
-        bodyConsole.print(response.body(), ConsoleViewContentType.NORMAL_OUTPUT)
     }
 
     override fun createWrapper() = HttpWrapperPanel(project)
