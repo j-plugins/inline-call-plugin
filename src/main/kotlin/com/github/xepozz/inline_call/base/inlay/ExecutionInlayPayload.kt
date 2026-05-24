@@ -2,6 +2,16 @@ package com.github.xepozz.inline_call.base.inlay
 
 import com.intellij.codeInsight.hints.declarative.InlayActionPayload
 import com.intellij.codeInsight.hints.declarative.StringInlayActionPayload
+import com.intellij.openapi.editor.Editor
+
+/**
+ * Session key shared by the collector (when it writes) and the action handlers
+ * (when they read). Uses `editor.hashCode()` for back-compat with the legacy
+ * provider; this is known to be unstable across IDE restarts, but fixing it is
+ * tracked separately by plan 05 (session-storage-key).
+ */
+fun makeKey(editor: Editor, featureId: String, line: Int): String =
+    "${editor.hashCode()}_${featureId}_$line"
 
 /**
  * Payload model carried by the declarative inlay click. Encoded as
