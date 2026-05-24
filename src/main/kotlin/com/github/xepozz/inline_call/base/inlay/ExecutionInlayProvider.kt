@@ -9,6 +9,7 @@ import com.github.xepozz.inline_call.base.extractors.AdapterLanguageExtractor
 import com.github.xepozz.inline_call.base.handlers.ExecutionState
 import com.github.xepozz.inline_call.base.inlay.ui.createResultContainer
 import com.github.xepozz.inline_call.base.inlay.ui.embedContainerIntoEditor
+import com.github.xepozz.inline_call.base.makeSessionKey
 import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
 import com.intellij.codeInsight.daemon.impl.InlayHintsPassFactoryInternal
 import com.intellij.codeInsight.hints.ChangeListener
@@ -26,11 +27,15 @@ import com.intellij.icons.AllIcons
 import com.intellij.openapi.application.invokeLater
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
+import com.intellij.psi.SmartPointerManager
+import com.intellij.psi.SmartPsiElementPointer
 import com.intellij.ui.dsl.builder.panel
 import java.awt.BorderLayout
 import java.awt.Cursor
+import java.util.IdentityHashMap
 import javax.swing.Icon
 import javax.swing.JPanel
 
@@ -56,6 +61,37 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
         // Pre-compute matches for the whole file once
         private val matchesByElement: Map<PsiElement, List<FeatureMatch>> = computeMatches(file)
 
+        // Pre-computed occurrence index per FeatureMatch (identity-keyed).
+        // Index is global per (featureId, valueHash) across the whole file,
+        // ordered by ascending originalRange.startOffset.
+        private val occurrenceIndex: Map<FeatureMatch, Int> = computeOccurrenceIndex(matchesByElement)
+
+        // virtualFileUrl is captured once — file is constant for the
+        // duration of this collector and we don't want to recompute on
+        // every collect() call.
+        private val virtualFile: VirtualFile? = file.virtualFile
+        private val virtualFileUrl: String? = virtualFile?.url
+
+        init {
+            // Stale-key sweep: any session for this file whose key no
+            // longer corresponds to a current match is evicted (process
+            // terminated, panel disposed). Done once per inlay pass.
+            virtualFileUrl?.let { url ->
+                val validKeys = buildValidKeysFor(url)
+                val evicted = sessionStorage.evictStale(url, validKeys)
+                evicted.forEach { session ->
+                    try { session.processHandler?.destroyProcess() } catch (_: Throwable) { }
+                    session.processHandler = null
+                    val container = session.container
+                    if (container != null) {
+                        invokeLater {
+                            container.parent?.remove(container)
+                        }
+                    }
+                }
+            }
+        }
+
         override fun collect(element: PsiElement, editor: Editor, sink: InlayHintsSink): Boolean {
             val matches = matchesByElement[element] ?: return true
             if (matches.isEmpty()) return true
@@ -64,7 +100,7 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
 
             matches.forEach { m ->
                 val offset = m.originalRange.startOffset
-                val pres = buildActionsPresentation(editor, project, m)
+                val pres = buildActionsPresentation(editor, project, m, element)
                 sink.addInlineElement(offset, false, pres, false)
             }
             return true
@@ -97,7 +133,43 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             return matches
         }
 
-        private fun buildActionsPresentation(editor: Editor, project: Project, match: FeatureMatch): InlayPresentation {
+        /**
+         * Build per-FeatureMatch occurrence indices (global across the
+         * whole file, grouped by `(featureId, valueHash)`, ordered by
+         * ascending `originalRange.startOffset`).
+         */
+        private fun computeOccurrenceIndex(
+            matchesByElement: Map<PsiElement, List<FeatureMatch>>
+        ): Map<FeatureMatch, Int> {
+            val all = matchesByElement.values.flatten()
+                .sortedBy { it.originalRange.startOffset }
+            val counters = HashMap<Pair<String, String>, Int>()
+            val result = IdentityHashMap<FeatureMatch, Int>()
+            for (m in all) {
+                val groupKey = m.featureId to SessionStorage.hashValue(m.value)
+                val next = counters[groupKey] ?: 0
+                result[m] = next
+                counters[groupKey] = next + 1
+            }
+            return result
+        }
+
+        private fun buildValidKeysFor(url: String): Set<String> {
+            val vf = virtualFile ?: return emptySet()
+            if (vf.url != url) return emptySet()
+            val keys = HashSet<String>(occurrenceIndex.size)
+            occurrenceIndex.forEach { (m, occ) ->
+                keys += makeSessionKey(vf, m, occ)
+            }
+            return keys
+        }
+
+        private fun buildActionsPresentation(
+            editor: Editor,
+            project: Project,
+            match: FeatureMatch,
+            element: PsiElement,
+        ): InlayPresentation {
             val feature = FeatureGenerator.getApplicable(project).firstOrNull { it.id == match.featureId }
             val icon: Icon? = feature?.icon
             val tooltip = feature?.let { "${it.tooltipPrefix}: ${match.value}" } ?: match.value
@@ -105,7 +177,9 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             val start = match.originalRange.startOffset
             val line = editor.document.getLineNumber(start)
             val lineEndOffset = editor.document.getLineEndOffset(line)
-            val key = makeKey(editor, match.featureId, line)
+            val vf = virtualFile
+            val occ = occurrenceIndex[match] ?: 0
+            val key = if (vf != null) makeSessionKey(vf, match, occ) else legacyFallbackKey(editor, match, line)
             val session = sessionStorage.getSession(key)
 
             val parts = mutableListOf<InlayPresentation>()
@@ -142,7 +216,7 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                     runPres = factory.withCursorOnHover(runPres, Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
                     runPres = factory.onClick(runPres, MouseButton.Left) { _, _ ->
                         val featureGenerator = feature ?: return@onClick
-                        run(editor, project, featureGenerator, match, key, lineEndOffset)
+                        run(editor, project, featureGenerator, match, key, lineEndOffset, element)
                     }
                     parts += runPres
                 }
@@ -157,7 +231,7 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
                     rerunPres = factory.withCursorOnHover(rerunPres, Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
                     rerunPres = factory.onClick(rerunPres, MouseButton.Left) { _, _ ->
                         val feat = feature ?: return@onClick
-                        run(editor, project, feat, match, key, lineEndOffset)
+                        run(editor, project, feat, match, key, lineEndOffset, element)
                     }
                     parts += rerunPres
 
@@ -188,31 +262,72 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
             match: FeatureMatch,
             key: String,
             lineEndOffset: Int,
+            element: PsiElement,
         ) {
             // Ensure wrapper exists and mounted
             var current = sessionStorage.getSession(key)
             val wrapper = feature.createWrapper()
+            val vfUrl = virtualFileUrl ?: ""
+            val occ = occurrenceIndex[match] ?: 0
+            val valueHash = SessionStorage.hashValue(match.value)
+            val anchor: SmartPsiElementPointer<PsiElement>? =
+                if (element.isValid) SmartPointerManager.getInstance(project).createSmartPsiElementPointer(element)
+                else null
 
-            if (current?.container == null) {
+            // The container may be null because (a) it was never mounted,
+            // (b) the previous editor was disposed on file close. In the
+            // latter case container is non-null but its parent is null —
+            // rebuild and re-mount on the live editor.
+            val needsContainer = current?.container == null || current.container?.parent == null
+
+            if (needsContainer) {
                 try {
                     val container = createResultContainer()
                     embedContainerIntoEditor(editor, container, lineEndOffset)
                     mountWrapperIntoContainer(container, wrapper)
 
-                    current = Session(container, wrapper)
+                    if (current == null) {
+                        current = Session(
+                            virtualFileUrl = vfUrl,
+                            featureId = match.featureId,
+                            valueHash = valueHash,
+                            occurrenceIndex = occ,
+                            anchor = anchor,
+                            container = container,
+                            wrapper = wrapper,
+                        )
+                    } else {
+                        current.container = container
+                        current.wrapper = wrapper
+                        if (current.anchor == null) current.anchor = anchor
+                    }
                 } catch (_: Throwable) {
-                    current = Session(null, wrapper)
+                    if (current == null) {
+                        current = Session(
+                            virtualFileUrl = vfUrl,
+                            featureId = match.featureId,
+                            valueHash = valueHash,
+                            occurrenceIndex = occ,
+                            anchor = anchor,
+                            container = null,
+                            wrapper = wrapper,
+                        )
+                    } else {
+                        current.wrapper = wrapper
+                        if (current.anchor == null) current.anchor = anchor
+                    }
                 }
                 sessionStorage.putSession(key, current)
             } else {
                 // Replace previous wrapper in the existing container
-                val container = current.container
+                val container = current.container!!
                 val oldWrapper = current.wrapper
                 if (oldWrapper != null) {
                     container.remove(oldWrapper.component)
                 }
                 mountWrapperIntoContainer(container, wrapper)
                 current.wrapper = wrapper
+                if (current.anchor == null) current.anchor = anchor
             }
             current.state = ExecutionState.RUNNING
 
@@ -272,5 +387,12 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
     }
 }
 
-fun makeKey(editor: Editor, featureId: String, line: Int): String = "${editor.hashCode()}_${featureId}_$line"
+/**
+ * Fallback used when the PSI file has no backing [VirtualFile] (e.g.
+ * dummy/light files in some test situations). We synthesise a key from
+ * the editor identity so behaviour matches the pre-plan-05 baseline for
+ * those edge cases instead of crashing.
+ */
+private fun legacyFallbackKey(editor: Editor, match: FeatureMatch, line: Int): String =
+    "ed=${editor.hashCode()}::${match.featureId}::${SessionStorage.hashValue(match.value)}#L${line}"
 
