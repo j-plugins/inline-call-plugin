@@ -14,7 +14,15 @@
     <resource-bundle>messages.CallBundle</resource-bundle>
 
     <extensions defaultExtensionNs="com.intellij">
+        <postStartupActivity
+                implementation="com.github.xepozz.inline_call.base.lifecycle.SessionLifecycleStarter"/>
     </extensions>
+
+    <projectListeners>
+        <listener
+                class="com.github.xepozz.inline_call.base.lifecycle.SessionLifecycleListener"
+                topic="com.intellij.openapi.fileEditor.FileEditorManagerListener"/>
+    </projectListeners>
 
     <extensionPoints>
         <extensionPoint
