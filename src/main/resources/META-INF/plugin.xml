@@ -9,10 +9,7 @@
     <depends optional="true" config-file="language-xml.xml">com.intellij.modules.xml</depends>
 
     <depends optional="true" config-file="language-php.xml">com.jetbrains.php</depends>
-    <depends optional="true" config-file="language-json.xml">com.intellij.modules.json</depends>
     <depends optional="true" config-file="language-yaml.xml">org.jetbrains.plugins.yaml</depends>
-    <depends optional="true" config-file="plugin-database.xml">com.intellij.database</depends>
-    <depends optional="true" config-file="plugin-dotenv.xml">ru.adelf.idea.dotenv</depends>
 
     <resource-bundle>messages.CallBundle</resource-bundle>
 
