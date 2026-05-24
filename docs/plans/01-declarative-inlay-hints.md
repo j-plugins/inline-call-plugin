@@ -52,8 +52,8 @@ Concrete problems:
 
 Replace `InlayHintsProvider<NoSettings>` with
 `com.intellij.codeInsight.hints.declarative.InlayHintsProvider`. Each
-button becomes a text token built with `PresentationTreeBuilder` (text + icon +
-clickable area). Clicks are dispatched through
+button becomes a text token built with `PresentationTreeBuilder`
+(text + clickable `InlayActionData`). Clicks are dispatched through
 `com.intellij.codeInsight.hints.declarative.InlayActionHandler` (registered via
 `com.intellij.codeInsight.inlayActionHandler`) with an `InlayActionPayload`
 that carries `(featureId, line, action)`. The embedded result `JPanel` stays
@@ -64,12 +64,23 @@ a `JComponent` into the editor and is **independent** of the inlay API.
 - (+) Removes the need to call `InlayHintsPassFactoryInternal` — the
       declarative framework re-collects hints on document/PSI change
       automatically; for state changes we can call public
-      `DeclarativeInlayHintsPassFactory.scheduleRecompute(editor)` or fall back
-      to `DaemonCodeAnalyzer.restart(file)`.
-- (+) Sink supports both inline (`addPresentation`) and end-of-line
-      (`addPresentation` with `position = EndOfLinePosition`) placement.
-- (−) Buttons become text-only (icon + label). Cursor-hover styling and
-      tooltips are supported, but we lose `factory.roundWithBackground` styling.
+      `DeclarativeInlayHintsPassFactory.scheduleRecompute(editor, project)`
+      (note: `impl` package, two arguments) followed by
+      `DaemonCodeAnalyzer.restart(file)`.
+- (+) Sink supports both inline (`InlineInlayPosition`) and end-of-line
+      (`EndOfLinePosition`) placement and accepts a `tooltip: String` argument
+      directly on `addPresentation(position, payloads, tooltip, hasBackground,
+      builder)`.
+- (−) **Buttons become text-only.** `PresentationTreeBuilder` exposes only
+      `text(...)`, `list(...)`, `collapsibleList(...)`, `clickHandlerScope(...)`
+      and (on `CollapsiblePresentationTreeBuilder`) `toggleButton(...)`. There
+      is **no `icon(...)` method** — verified by `javap` on
+      `com.intellij.codeInsight.hints.declarative.PresentationTreeBuilder` in
+      the 2025.1.1 platform jar (`lib/app-client.jar`). We therefore lose
+      `factory.icon(AllIcons.Actions.Execute)` and `factory.roundWithBackground`
+      styling; buttons render as bracketed text tokens such as `[Run]`,
+      `[Stop]`, `[Delete]`, `[Collapse]`. Background is controlled by the
+      `hasBackground` boolean on `addPresentation` (or `HintFormat`).
 - (−) Click handling becomes EP-routed: we cannot capture a lambda over
       `editor` / `match`, so all state for a click must be encoded in the
       payload + looked up via `SessionStorage`.
@@ -142,13 +153,22 @@ Rationale:
    - Remove the import of
      `com.intellij.codeInsight.daemon.impl.InlayHintsPassFactoryInternal`
      (`ExecutionInlayProvider.kt:13`).
-   - Replace the body with `DaemonCodeAnalyzer.getInstance(project).restart(file)`,
-     where `file` is captured from `getCollectorFor(file, …)`
+   - Replace the body with
+     `DaemonCodeAnalyzer.getInstance(project).restart(file)`, where `file` is
+     captured from `getCollectorFor(file, …)`
      (`ExecutionInlayProvider.kt:48-53`).
+   - **Note.** The legacy (non-declarative) inlay pass for the old
+     `InlayHintsProvider<NoSettings>` does re-run on `restart(file)` —
+     `InlayHintsPassFactoryInternal.forceHintsUpdateOnNextPass()` is only
+     needed when the file's PSI/modification stamp has not changed AND we want
+     to force the cache to be discarded. For our use case the inlay collector
+     reads off-PSI state (`SessionStorage`); the daemon will still re-run the
+     pass because `restart(file)` invalidates the daemon's per-file scheduling
+     state. If this proves insufficient in practice (Phase 1 verification),
+     fall back to capturing the produced `Inlay` references from the collector
+     and calling `Inlay.update()` per match — this stays in public API.
 2. Verify on the playground project that clicking Run → Stop transitions still
-   re-render. If `restart(file)` is not enough, fall back to invalidating the
-   specific inlay via `editor.inlayModel.getInlineElementsInRange(...).forEach { it.update() }`
-   — this stays in public API.
+   re-render.
 3. Keep `@Suppress("UnstableApiUsage")` — it is still required by the old DSL;
    it will be removed in Phase 2.
 
@@ -175,16 +195,20 @@ Deliverable: one commit, no behaviour change, no `*Internal` import.
 
 5. Replace the imperative `factory.icon` / `factory.text` / `factory.onClick`
    chain (`ExecutionInlayProvider.kt:100-182`) with the declarative
-   `PresentationTreeBuilder` DSL:
-   - `text("Run", InlayActionData(payload, RUN_HANDLER_ID))` for buttons with
-     payloads.
-   - `icon(AllIcons.Actions.Execute)` for icons; chain with `text(...)` inside
-     the same builder block.
-   - For a tooltip use the `tooltip = "..."` argument on `text(...)`.
-   - For an icon-only clickable, use `icon(...)` followed by an empty
-     `text(" ", InlayActionData(...))` so we still have a click area, **or**
-     wrap inside a clickable region — confirm exact API on
-     `PresentationTreeBuilder.kt` in the target platform.
+   `PresentationTreeBuilder` DSL. The builder is text-only — there is no
+   `icon(...)` method — so each button is rendered as a labelled token:
+   - `text("Run", InlayActionData(payload, RUN_HANDLER_ID))` for the Run
+     button. Use plain ASCII labels: `Run`, `Stop`, `Delete`, `Collapse` /
+     `Expand`, `Rerun`. Wrap in spaces and/or brackets (`[Run]`) so the click
+     target is visually obvious.
+   - Tooltip is supplied via the `tooltip: String` argument of
+     `sink.addPresentation(position, payloads, tooltip, hasBackground, builder)`
+     — *not* via `text(...)` (no per-token tooltip is exposed in the public
+     `PresentationTreeBuilder`).
+   - Background pill is controlled by `hasBackground = true` on
+     `addPresentation`. Each button gets its **own** `addPresentation` call so
+     each one has an independent tooltip and background, and so the platform
+     does not insert a separator between them inside one presentation tree.
 
 #### 2.2 Move clicks to `InlayActionHandler` extensions
 
@@ -249,11 +273,15 @@ Deliverable: one commit, no behaviour change, no `*Internal` import.
 #### 2.4 Refresh on state change without `*Internal`
 
 11. From `ExecutionController`, after mutating session state, call
-    `DeclarativeInlayHintsPassFactory.scheduleRecompute(editor)` (public, in
-    `com.intellij.codeInsight.hints.declarative.impl`). If that proves
-    insufficient (state lives off-PSI, so the daemon will not re-run by
-    itself), call
-    `DaemonCodeAnalyzer.getInstance(project).restart(psiFile)` afterwards.
+    `DeclarativeInlayHintsPassFactory.scheduleRecompute(editor, project)`
+    (public, in `com.intellij.codeInsight.hints.declarative.impl`,
+    **two arguments** — editor and project). Always follow with
+    `DaemonCodeAnalyzer.getInstance(project).restart(psiFile)` because session
+    state lives off-PSI and the daemon would otherwise see no modification
+    stamp change and skip the pass. Wrap both calls in `invokeLater { … }` —
+    these are EDT-bound APIs and we may be called from a process listener
+    thread (see `processTerminated` in the original
+    `ExecutionInlayProvider.kt:227`).
 
 #### 2.5 Decommission the old provider
 
@@ -282,6 +310,11 @@ Deliverable: one commit, no behaviour change, no `*Internal` import.
   is already tracked as
   [`05-session-storage-key.md`](./05-session-storage-key.md). The migration
   should *not* fix that key bug, but should also *not* make it worse.
+  Concretely: encode the payload as `"$featureId|$line"` (action name is
+  carried by the `handlerId` of `InlayActionData`). The handler must
+  reconstruct the same `makeKey(editor, featureId, line)` string using the
+  `editor` argument passed by `InlayActionHandler.handleClick(editor,
+  payload)` so the hash-based key matches the one written by the collector.
 - **Per-project EP vs application EP for handlers.**
   `inlayActionHandler` is application-level, while
   [`FeatureGenerator.EP_NAME`](../../src/main/kotlin/com/github/xepozz/inline_call/base/api/FeatureGenerator.kt#L36)
