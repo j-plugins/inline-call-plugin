@@ -57,7 +57,14 @@ class SegmentedOffsetMapping(
      * - For an offset inside a segment, returns the exact original
      *   position.
      * - For `normalizedOffset == normalizedLength` (the end sentinel),
-     *   returns [originalLength].
+     *   returns the document offset immediately *after* the last
+     *   preserved character — i.e. `lastSegment.originalStart +
+     *   lastSegment.length`, or [originalLength] when the mapping is
+     *   empty. This makes
+     *   `originalRange = toOriginal(start)..toOriginal(start+len)`
+     *   correctly span the matched substring even when trailing
+     *   decoration (e.g. a newline followed by the PHPDoc closer)
+     *   follows it in the original text.
      * - For an offset that falls between two segments (which can only
      *   happen when segments have zero-length gaps in normalized
      *   coordinates — they do not, by construction), it returns the
@@ -67,7 +74,9 @@ class SegmentedOffsetMapping(
         require(normalizedOffset in 0..normalizedLength) {
             "normalizedOffset $normalizedOffset out of bounds [0, $normalizedLength]"
         }
-        if (normalizedOffset == normalizedLength) return originalLength
+        if (normalizedOffset == normalizedLength) {
+            return segments.lastOrNull()?.let { it.originalStart + it.length } ?: originalLength
+        }
         val idx = findSegmentByNormalized(normalizedOffset)
         if (idx >= 0) {
             val s = segments[idx]

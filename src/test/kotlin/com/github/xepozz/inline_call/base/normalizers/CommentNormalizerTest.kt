@@ -111,7 +111,9 @@ class CommentNormalizerTest {
         assertEquals(7, n.mapping.toOriginal(0))   // 'L'
         assertEquals(15, n.mapping.toOriginal(8))  // '\n'
         assertEquals(19, n.mapping.toOriginal(9))  // 's'
-        assertEquals(38, n.mapping.toOriginal(n.text.length))
+        // End sentinel: position right after last preserved char ('2').
+        // Last segment is (9, 19, 14) -> 33 (original `\n */` starts here).
+        assertEquals(33, n.mapping.toOriginal(n.text.length))
     }
 
     @Test

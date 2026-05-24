@@ -36,18 +36,32 @@ class SegmentedOffsetMappingTest {
         )
         assertEquals(4, mapping.toOriginal(0))
         assertEquals(5, mapping.toOriginal(1))
-        assertEquals(7, mapping.toOriginal(3))  // end sentinel -> originalLength
-        // Wait: normalizedLength = 3, end sentinel returns originalLength = 10.
     }
 
     @Test
-    fun `end sentinel returns originalLength`() {
+    fun `end sentinel returns position right after last preserved char`() {
+        // Original: "<!--foo-->", normalized: "foo". After 'foo' the
+        // original position is 7 (the start of "-->"), not the document
+        // end 10 — so a match spanning the whole body lands at [4, 7).
         val mapping = SegmentedOffsetMapping(
             segments = listOf(SegmentedOffsetMapping.Segment(0, 4, 3)),
             normalizedLength = 3,
             originalLength = 10,
         )
-        assertEquals(10, mapping.toOriginal(3))
+        assertEquals(7, mapping.toOriginal(3))
+    }
+
+    @Test
+    fun `end sentinel falls back to originalLength when no segments`() {
+        val mapping = SegmentedOffsetMapping(emptyList(), 0, 5)
+        assertEquals(5, mapping.toOriginal(0))
+    }
+
+    @Test
+    fun `identity end sentinel still returns length`() {
+        // For identity mappings lastSegment.originalStart + length == length.
+        val mapping = SegmentedOffsetMapping.identity(7)
+        assertEquals(7, mapping.toOriginal(7))
     }
 
     @Test
@@ -66,7 +80,10 @@ class SegmentedOffsetMappingTest {
         assertEquals(15, mapping.toOriginal(8))    // '\n'
         assertEquals(19, mapping.toOriginal(9))    // 's' in "shell"
         assertEquals(32, mapping.toOriginal(22))   // last char '2'
-        assertEquals(38, mapping.toOriginal(23))   // end sentinel
+        // End sentinel returns position right after last preserved char:
+        // last segment (9, 19, 14) -> 19 + 14 = 33. The original text
+        // continues with "\n */" past that point.
+        assertEquals(33, mapping.toOriginal(23))
     }
 
     @Test
@@ -140,12 +157,17 @@ class SegmentedOffsetMappingTest {
             norm += 5
             orig += 5 + 2
         }
+        // The final 2-char gap after the last segment is *not* preserved
+        // content. originalLength can include it (e.g. trailing `*/`)
+        // without changing the per-index mapping.
         val mapping = SegmentedOffsetMapping(segments, norm, orig)
         // Every preserved index should map correctly and round-trip.
         for (i in 0 until norm) {
             val o = mapping.toOriginal(i)
             assertEquals(i, mapping.toNormalized(o))
         }
-        assertEquals(orig, mapping.toOriginal(norm))
+        // End sentinel: position right after last preserved char.
+        val last = segments.last()
+        assertEquals(last.originalStart + last.length, mapping.toOriginal(norm))
     }
 }
