@@ -13,10 +13,13 @@ import org.jetbrains.annotations.Nls
 import javax.swing.Icon
 
 class HttpRunConfigurationType : ConfigurationType {
-    
+
     companion object {
+        // Persistence contract: this value is written into workspace.xml as
+        // `type="..."` and is part of the plugin's public surface once
+        // shipped. Do NOT rename without a migration shim.
         const val ID = "HttpInlayRunConfiguration"
-        
+
         fun getInstance(): HttpRunConfigurationType =
             ConfigurationTypeUtil.findConfigurationType(HttpRunConfigurationType::class.java)
     }
@@ -33,9 +36,15 @@ class HttpRunConfigurationType : ConfigurationType {
 }
 
 class HttpConfigurationFactory(type: ConfigurationType) : com.intellij.execution.configurations.ConfigurationFactory(type) {
-    
-    override fun getId(): String = HttpRunConfigurationType.ID
-    
+
+    companion object {
+        // Persistence contract: written into workspace.xml as `factoryName="..."`.
+        // Must be unique within `HttpRunConfigurationType`. Do NOT rename.
+        const val FACTORY_ID = "HTTP"
+    }
+
+    override fun getId(): String = FACTORY_ID
+
     override fun createTemplateConfiguration(project: Project): RunConfiguration =
         HttpRunConfiguration(project, this, "HTTP")
 
