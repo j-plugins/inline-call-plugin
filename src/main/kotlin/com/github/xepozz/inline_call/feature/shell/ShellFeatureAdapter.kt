@@ -31,7 +31,10 @@ class ShellFeatureAdapter(val project: Project) : FeatureGenerator<ConsoleWrappe
         val base = block.originalRange.startOffset
         return matches.map { m ->
             val startOriginal = base + block.mapping.toOriginal(m.offset)
-            val endOriginal = startOriginal + m.value.length
+            val endOriginal = base + block.mapping.toOriginal(m.offset + m.value.length)
+            assert(endOriginal - startOriginal >= m.value.length) {
+                "endOriginal($endOriginal) - startOriginal($startOriginal) < value.length(${m.value.length})"
+            }
             FeatureMatch(
                 featureId = id,
                 block = block,
