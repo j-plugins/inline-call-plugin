@@ -123,7 +123,12 @@ class SegmentedOffsetMapping(
 
 - Sorted by `normalizedStart`; binary search is `O(log n)`.
 - Inside segment `s`: `toOriginal(o) = s.originalStart + (o - s.normalizedStart)`.
-- At `o == normalizedLength`: return `originalLength`.
+- At `o == normalizedLength`: return
+  `lastSegment.originalStart + lastSegment.length` (or `originalLength`
+  when the mapping is empty). This makes `endOriginal = base +
+  toOriginal(start + length)` span exactly the matched substring even
+  when the original text continues with stripped decoration
+  (e.g. PHPDoc closer).
 - `toNormalized` on a stripped char clamps to the next segment's
   `normalizedStart`.
 
