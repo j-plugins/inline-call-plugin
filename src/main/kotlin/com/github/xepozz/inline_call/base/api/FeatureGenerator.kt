@@ -22,13 +22,20 @@ interface FeatureGenerator<TWrapper : Wrapper> {
 
     /**
      * Execute the given match and stream output to the provided wrapper.
+     *
+     * Returns the [ProcessHandler] driving the execution, or `null` when the
+     * feature does not have process semantics or failed to start. Implementations
+     * must have already called [ProcessHandler.startNotify] before returning.
+     *
+     * Callers should launch this from a [kotlinx.coroutines.CoroutineScope]
+     * bound to the project (`SessionStorage.cs`) so cancellation propagates
+     * to in-flight IO.
      */
-    fun execute(
+    suspend fun execute(
         match: FeatureMatch,
         wrapper: TWrapper,
         project: Project,
-        onProcessCreated: (ProcessHandler?) -> Unit = {}
-    )
+    ): ProcessHandler?
 
     fun createWrapper(): TWrapper
 

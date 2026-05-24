@@ -29,6 +29,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
 import com.intellij.ui.dsl.builder.panel
+import kotlinx.coroutines.launch
 import java.awt.BorderLayout
 import java.awt.Cursor
 import javax.swing.Icon
@@ -218,12 +219,22 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
 
             refreshInlays(editor)
 
-            // Execute and capture process lifecycle
+            // Execute and capture process lifecycle.
+            // Bridge: launch the suspending feature.execute on the project
+            // coroutine scope. UI mutations stay on invokeLater for now — the
+            // EDT migration happens in the next commit (step 4).
             val session = current
-            feature.execute(match, wrapper, project) { processHandler ->
+            sessionStorage.cs.launch {
+                val processHandler = feature.execute(match, wrapper, project)
                 session.processHandler = processHandler
 
-                processHandler?.addProcessListener(object : ProcessListener {
+                if (processHandler == null) {
+                    session.state = ExecutionState.FINISHED
+                    refreshInlays(editor)
+                    return@launch
+                }
+
+                processHandler.addProcessListener(object : ProcessListener {
                     override fun processTerminated(event: ProcessEvent) {
                         session.state = ExecutionState.FINISHED
                         session.processHandler = null
