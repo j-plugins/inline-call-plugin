@@ -10,13 +10,15 @@ import com.intellij.execution.filters.TextConsoleBuilderFactory
 import com.intellij.execution.runners.ExecutionEnvironment
 import com.intellij.execution.runners.ProgramRunner
 import com.intellij.execution.ui.ConsoleViewContentType
+import com.intellij.openapi.application.ApplicationManager
 import java.io.OutputStream
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.net.http.HttpTimeoutException
 import java.time.Duration
-import kotlin.concurrent.thread
+import java.util.concurrent.Future
 
 class HttpRunState(
     private val configuration: HttpRunConfiguration,
@@ -45,10 +47,15 @@ class HttpProcessHandler(
         .followRedirects(HttpClient.Redirect.NORMAL)
         .build()
 
+    // Reference to the in-flight request so destroyProcessImpl can cancel it.
+    // Plan 03 will replace this with a coroutine Job rooted in SessionStorage.cs.
+    @Volatile
+    private var requestFuture: Future<*>? = null
+
     override fun startNotify() {
         super.startNotify()
-        
-        thread {
+
+        requestFuture = ApplicationManager.getApplication().executeOnPooledThread {
             executeRequest()
         }
     }
@@ -89,6 +96,19 @@ class HttpProcessHandler(
 
             printResponse(response)
 
+        } catch (e: InterruptedException) {
+            // Triggered by destroyProcessImpl -> Future.cancel(true).
+            printToConsole("\n[Cancelled]\n", ConsoleViewContentType.SYSTEM_OUTPUT)
+            Thread.currentThread().interrupt()
+        } catch (e: HttpTimeoutException) {
+            // HttpClient maps thread interruption during a blocking send to
+            // HttpTimeoutException on some implementations; treat as cancel
+            // when the future was cancelled, otherwise surface as timeout.
+            if (requestFuture?.isCancelled == true) {
+                printToConsole("\n[Cancelled]\n", ConsoleViewContentType.SYSTEM_OUTPUT)
+            } else {
+                printToConsole("\n[Timeout: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
+            }
         } catch (e: Exception) {
             printToConsole("\n[Error: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
         } finally {
@@ -115,17 +135,17 @@ class HttpProcessHandler(
 
         // Body
         printToConsole("\n--- Response Body ---\n", ConsoleViewContentType.LOG_DEBUG_OUTPUT)
-        
+
         val body = response.body()
         val contentType = response.headers().firstValue("content-type").orElse("")
-        
+
         // Pretty print JSON
         val displayBody = if (contentType.contains("json")) {
             tryPrettyPrintJson(body)
         } else {
             body
         }
-        
+
         printToConsole(displayBody, ConsoleViewContentType.NORMAL_OUTPUT)
 
         if (body.length > 10000) {
@@ -161,6 +181,7 @@ class HttpProcessHandler(
     }
 
     override fun destroyProcessImpl() {
+        requestFuture?.cancel(true)
         notifyProcessTerminated(1)
     }
 
