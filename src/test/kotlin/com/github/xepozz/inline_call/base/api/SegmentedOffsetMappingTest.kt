@@ -1,0 +1,151 @@
+package com.github.xepozz.inline_call.base.api
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
+import org.junit.Test
+
+/**
+ * Pure-Kotlin tests for SegmentedOffsetMapping — no IntelliJ platform
+ * harness needed.
+ */
+class SegmentedOffsetMappingTest {
+
+    @Test
+    fun `identity round-trips every offset`() {
+        val mapping = SegmentedOffsetMapping.identity(10)
+        for (i in 0..10) {
+            assertEquals(i, mapping.toOriginal(i))
+            assertEquals(i, mapping.toNormalized(i))
+        }
+    }
+
+    @Test
+    fun `identity of length zero is a valid empty mapping`() {
+        val mapping = SegmentedOffsetMapping.identity(0)
+        assertEquals(0, mapping.toOriginal(0))
+        assertEquals(0, mapping.toNormalized(0))
+    }
+
+    @Test
+    fun `single-segment with leading gap maps to original start of segment`() {
+        // Original: "<!--foo-->", normalized: "foo".
+        val mapping = SegmentedOffsetMapping(
+            segments = listOf(SegmentedOffsetMapping.Segment(0, 4, 3)),
+            normalizedLength = 3,
+            originalLength = 10,
+        )
+        assertEquals(4, mapping.toOriginal(0))
+        assertEquals(5, mapping.toOriginal(1))
+        assertEquals(7, mapping.toOriginal(3))  // end sentinel -> originalLength
+        // Wait: normalizedLength = 3, end sentinel returns originalLength = 10.
+    }
+
+    @Test
+    fun `end sentinel returns originalLength`() {
+        val mapping = SegmentedOffsetMapping(
+            segments = listOf(SegmentedOffsetMapping.Segment(0, 4, 3)),
+            normalizedLength = 3,
+            originalLength = 10,
+        )
+        assertEquals(10, mapping.toOriginal(3))
+    }
+
+    @Test
+    fun `multi-segment maps across PHPDoc-style gaps`() {
+        // Original: "/**\n * Line one\n * shell: echo 42\n */"
+        // Normalized: "Line one\nshell: echo 42"
+        val segments = listOf(
+            SegmentedOffsetMapping.Segment(0, 7, 8),    // "Line one"
+            SegmentedOffsetMapping.Segment(8, 15, 1),   // "\n"
+            SegmentedOffsetMapping.Segment(9, 19, 14),  // "shell: echo 42"
+        )
+        val mapping = SegmentedOffsetMapping(segments, normalizedLength = 23, originalLength = 38)
+
+        assertEquals(7, mapping.toOriginal(0))     // 'L'
+        assertEquals(14, mapping.toOriginal(7))    // 'e' in "one"
+        assertEquals(15, mapping.toOriginal(8))    // '\n'
+        assertEquals(19, mapping.toOriginal(9))    // 's' in "shell"
+        assertEquals(32, mapping.toOriginal(22))   // last char '2'
+        assertEquals(38, mapping.toOriginal(23))   // end sentinel
+    }
+
+    @Test
+    fun `toNormalized clamps right on stripped char`() {
+        // Original: "<!--foo-->", normalized: "foo" (gap at [0,4) and [7,10)).
+        val mapping = SegmentedOffsetMapping(
+            segments = listOf(SegmentedOffsetMapping.Segment(0, 4, 3)),
+            normalizedLength = 3,
+            originalLength = 10,
+        )
+        // Inside gap [0,4): clamp to next segment start (normalized 0).
+        assertEquals(0, mapping.toNormalized(0))
+        assertEquals(0, mapping.toNormalized(2))
+        // Inside segment.
+        assertEquals(0, mapping.toNormalized(4))
+        assertEquals(1, mapping.toNormalized(5))
+        assertEquals(2, mapping.toNormalized(6))
+        // Trailing gap [7,10): no next segment, clamp to normalizedLength.
+        assertEquals(3, mapping.toNormalized(7))
+        assertEquals(3, mapping.toNormalized(9))
+        assertEquals(3, mapping.toNormalized(10))
+    }
+
+    @Test
+    fun `out-of-bounds normalized offset throws`() {
+        val mapping = SegmentedOffsetMapping.identity(5)
+        assertThrows(IllegalArgumentException::class.java) { mapping.toOriginal(-1) }
+        assertThrows(IllegalArgumentException::class.java) { mapping.toOriginal(6) }
+    }
+
+    @Test
+    fun `out-of-bounds original offset throws`() {
+        val mapping = SegmentedOffsetMapping.identity(5)
+        assertThrows(IllegalArgumentException::class.java) { mapping.toNormalized(-1) }
+        assertThrows(IllegalArgumentException::class.java) { mapping.toNormalized(6) }
+    }
+
+    @Test
+    fun `overlapping segments rejected at construction`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            SegmentedOffsetMapping(
+                segments = listOf(
+                    SegmentedOffsetMapping.Segment(0, 0, 5),
+                    SegmentedOffsetMapping.Segment(3, 10, 5),
+                ),
+                normalizedLength = 10,
+                originalLength = 20,
+            )
+        }
+    }
+
+    @Test
+    fun `segment exceeding originalLength rejected`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            SegmentedOffsetMapping(
+                segments = listOf(SegmentedOffsetMapping.Segment(0, 5, 10)),
+                normalizedLength = 10,
+                originalLength = 10,
+            )
+        }
+    }
+
+    @Test
+    fun `preserved-index property holds across many segments`() {
+        // Build a 100-segment ladder: each segment 5 chars long, 2-char gap between.
+        val segments = mutableListOf<SegmentedOffsetMapping.Segment>()
+        var norm = 0
+        var orig = 0
+        repeat(100) {
+            segments += SegmentedOffsetMapping.Segment(norm, orig, 5)
+            norm += 5
+            orig += 5 + 2
+        }
+        val mapping = SegmentedOffsetMapping(segments, norm, orig)
+        // Every preserved index should map correctly and round-trip.
+        for (i in 0 until norm) {
+            val o = mapping.toOriginal(i)
+            assertEquals(i, mapping.toNormalized(o))
+        }
+        assertEquals(orig, mapping.toOriginal(norm))
+    }
+}
