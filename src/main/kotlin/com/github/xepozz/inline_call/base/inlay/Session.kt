@@ -3,6 +3,7 @@ package com.github.xepozz.inline_call.base.inlay
 import com.github.xepozz.inline_call.base.api.Wrapper
 import com.github.xepozz.inline_call.base.handlers.ExecutionState
 import com.intellij.execution.process.ProcessHandler
+import kotlinx.coroutines.Job
 import javax.swing.JPanel
 
 data class Session(
@@ -11,4 +12,5 @@ data class Session(
     var state: ExecutionState = ExecutionState.IDLE,
     var processHandler: ProcessHandler? = null,
     var collapsed: Boolean = false,
+    var job: Job? = null,
 )
