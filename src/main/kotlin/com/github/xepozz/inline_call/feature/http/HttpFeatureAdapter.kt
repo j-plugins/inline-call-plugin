@@ -8,25 +8,23 @@ import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.ui.ConsoleView
 import com.intellij.execution.ui.ConsoleViewContentType
 import com.intellij.icons.AllIcons
-import com.intellij.openapi.application.EDT
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.TextRange
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.runInterruptible
-import kotlinx.coroutines.withContext
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Duration
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
 import javax.swing.Icon
 
 /**
- * Feature adapter that delegates matching and execution to existing HttpExecutionHandler.
+ * HTTP feature adapter. Async via [HttpClient.sendAsync] (no coroutines —
+ * see [com.github.xepozz.inline_call.base.api.FeatureGenerator.execute]
+ * for why the suspend chain was reverted).
  */
 class HttpFeatureAdapter(val project: Project) : FeatureGenerator<HttpWrapperPanel> {
     override val id: String = "http"
@@ -59,11 +57,12 @@ class HttpFeatureAdapter(val project: Project) : FeatureGenerator<HttpWrapperPan
         }
     }
 
-    override suspend fun execute(
+    override fun execute(
         match: FeatureMatch,
         wrapper: HttpWrapperPanel,
         project: Project,
-    ): ProcessHandler? {
+        onProcessCreated: (ProcessHandler?) -> Unit,
+    ) {
         val value = match.value
         val console = wrapper.console
 
@@ -76,21 +75,22 @@ class HttpFeatureAdapter(val project: Project) : FeatureGenerator<HttpWrapperPan
             .GET()
             .build()
 
+        var future: CompletableFuture<HttpResponse<String>>? = null
         val terminated = AtomicBoolean(false)
         val handler = object : ProcessHandler() {
             override fun detachIsDefault(): Boolean = false
             override fun getProcessInput() = null
 
             override fun destroyProcessImpl() {
-                // The owning coroutine cancellation interrupts the IO thread.
-                // We only flip the terminated state and notify.
                 if (terminated.compareAndSet(false, true)) {
-                    notifyProcessTerminated(143)
+                    future?.cancel(true)
+                    notifyProcessTerminated(0)
                 }
             }
 
             override fun detachProcessImpl() {
                 if (terminated.compareAndSet(false, true)) {
+                    future?.cancel(true)
                     notifyProcessDetached()
                 }
             }
@@ -101,29 +101,25 @@ class HttpFeatureAdapter(val project: Project) : FeatureGenerator<HttpWrapperPan
                 }
             }
         }
+
+        onProcessCreated(handler)
         handler.startNotify()
 
-        try {
-            val response = runInterruptible(Dispatchers.IO) {
-                httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+        future = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+            .whenComplete { response, throwable ->
+                if (throwable != null) {
+                    ApplicationManager.getApplication().invokeLater {
+                        console.print("[Error: ${throwable.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
+                    }
+                    handler.complete(-1)
+                } else if (response != null) {
+                    ApplicationManager.getApplication().invokeLater {
+                        console.clear()
+                        printResponse(console, response)
+                    }
+                    handler.complete(0)
+                }
             }
-            withContext(NonCancellable + Dispatchers.EDT) {
-                console.clear()
-                printResponse(console, response)
-            }
-            handler.complete(0)
-        } catch (ce: CancellationException) {
-            // Cancellation: the caller (Stop button / project close) drives UI feedback.
-            handler.complete(143)
-            throw ce
-        } catch (t: Throwable) {
-            withContext(NonCancellable + Dispatchers.EDT) {
-                console.clear()
-                console.print("[Error: ${t.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
-            }
-            handler.complete(-1)
-        }
-        return handler
     }
 
     private fun printResponse(console: ConsoleView, response: HttpResponse<String>) {

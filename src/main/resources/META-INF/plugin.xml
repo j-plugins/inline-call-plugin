@@ -23,29 +23,7 @@
                 implementation="com.github.xepozz.inline_call.feature.http.run.HttpRunConfigurationProducer"/>
         <runConfigurationProducer
                 implementation="com.github.xepozz.inline_call.feature.shell.run.ShellRunConfigurationProducer"/>
-
-        <postStartupActivity
-                implementation="com.github.xepozz.inline_call.base.lifecycle.SessionLifecycleStarter"/>
-
-        <codeInsight.inlayActionHandler
-                handlerId="inline_call.execution.run"
-                implementationClass="com.github.xepozz.inline_call.base.inlay.RunInlayActionHandler"/>
-        <codeInsight.inlayActionHandler
-                handlerId="inline_call.execution.stop"
-                implementationClass="com.github.xepozz.inline_call.base.inlay.StopInlayActionHandler"/>
-        <codeInsight.inlayActionHandler
-                handlerId="inline_call.execution.delete"
-                implementationClass="com.github.xepozz.inline_call.base.inlay.DeleteInlayActionHandler"/>
-        <codeInsight.inlayActionHandler
-                handlerId="inline_call.execution.toggle_collapse"
-                implementationClass="com.github.xepozz.inline_call.base.inlay.ToggleCollapseInlayActionHandler"/>
     </extensions>
-
-    <projectListeners>
-        <listener
-                class="com.github.xepozz.inline_call.base.lifecycle.SessionLifecycleListener"
-                topic="com.intellij.openapi.fileEditor.FileEditorManagerListener"/>
-    </projectListeners>
 
     <extensionPoints>
         <extensionPoint

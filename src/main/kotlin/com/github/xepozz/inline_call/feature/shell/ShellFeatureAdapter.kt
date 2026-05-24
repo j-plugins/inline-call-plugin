@@ -10,17 +10,24 @@ import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.process.ProcessTerminatedListener
 import com.intellij.execution.ui.ConsoleViewContentType
 import com.intellij.icons.AllIcons
-import com.intellij.openapi.application.EDT
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.TextRange
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.withContext
 import java.util.regex.Pattern
 import javax.swing.Icon
 
 /**
- * Feature adapter that delegates matching and execution to existing ShellExecutionHandler.
+ * Feature adapter that runs a shell command via [OSProcessHandler].
+ *
+ * The implementation is intentionally callback-based (no coroutines)
+ * because the inlay click path runs on EDT and any suspension between
+ * EDT and the service scope was found to silently swallow the work
+ * (see the design notes on
+ * [com.github.xepozz.inline_call.base.inlay.ExecutionController]).
+ *
+ * `Process.start()` is fast — running it on the caller's thread (EDT)
+ * is acceptable for a one-off click. The actual process IO happens
+ * off-thread inside OSProcessHandler's notification machinery.
  */
 class ShellFeatureAdapter(val project: Project) : FeatureGenerator<ConsoleWrapperPanel> {
     override val id: String = "shell"
@@ -48,35 +55,29 @@ class ShellFeatureAdapter(val project: Project) : FeatureGenerator<ConsoleWrappe
         }
     }
 
-    override suspend fun execute(
+    override fun execute(
         match: FeatureMatch,
         wrapper: ConsoleWrapperPanel,
         project: Project,
-    ): ProcessHandler? {
+        onProcessCreated: (ProcessHandler?) -> Unit,
+    ) {
         val value = match.value
         val console = wrapper.console
 
-        // Note: we do NOT wrap OSProcessHandler construction in
-        // withContext(Dispatchers.IO). Inside BasePlatformTestCase the
-        // `withContext` switch from the service-scope's default dispatcher
-        // never resumes — see SessionStorageCoroutineTest. Process.start()
-        // is fast enough (ms) to run on the caller's thread; the actual
-        // process IO happens off-thread inside OSProcessHandler anyway.
-        return try {
+        try {
             val commandLine = GeneralCommandLine("/bin/sh", "-c", value)
                 .withRedirectErrorStream(true)
             val processHandler = OSProcessHandler(commandLine).also {
                 ProcessTerminatedListener.attach(it)
             }
             console.attachToProcess(processHandler)
+            onProcessCreated(processHandler)
             processHandler.startNotify()
-            processHandler
         } catch (e: Exception) {
-            // Print the error directly; we're already on the same thread
-            // the caller picked for us (EDT in production, test thread in
-            // tests).
-            console.print("\n[Error: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
-            null
+            ApplicationManager.getApplication().invokeLater {
+                console.print("\n[Error: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
+            }
+            onProcessCreated(null)
         }
     }
 

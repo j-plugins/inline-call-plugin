@@ -1,14 +1,8 @@
 <idea-plugin>
     <extensions defaultExtensionNs="com.intellij">
-        <codeInsight.declarativeInlayProvider
+        <codeInsight.inlayProvider
                 language="XML"
-                implementationClass="com.github.xepozz.inline_call.base.inlay.ExecutionDeclarativeInlayProvider"
-                isEnabledByDefault="true"
-                group="OTHER_GROUP"
-                providerId="inline_call.execution"
-                bundle="messages.CallBundle"
-                nameKey="inlay.execution.name"
-                descriptionKey="inlay.execution.description"/>
+                implementationClass="com.github.xepozz.inline_call.base.inlay.ExecutionInlayProvider"/>
     </extensions>
 
     <extensions defaultExtensionNs="com.github.xepozz.inline_call">

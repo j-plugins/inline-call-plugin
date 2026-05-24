@@ -2,7 +2,6 @@
 
 package com.github.xepozz.inline_call.feature.http.run
 
-import com.github.xepozz.inline_call.base.SessionStorage
 import com.intellij.execution.DefaultExecutionResult
 import com.intellij.execution.ExecutionResult
 import com.intellij.execution.Executor
@@ -11,24 +10,13 @@ import com.intellij.execution.filters.TextConsoleBuilderFactory
 import com.intellij.execution.runners.ExecutionEnvironment
 import com.intellij.execution.runners.ProgramRunner
 import com.intellij.execution.ui.ConsoleViewContentType
-import com.intellij.openapi.application.EDT
-import com.intellij.openapi.project.Project
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineName
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runInterruptible
-import kotlinx.coroutines.withContext
 import java.io.OutputStream
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
-import java.net.http.HttpTimeoutException
 import java.time.Duration
-import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.concurrent.thread
 
 class HttpRunState(
     private val configuration: HttpRunConfiguration,
@@ -40,7 +28,7 @@ class HttpRunState(
             .createBuilder(environment.project)
             .console
 
-        val processHandler = HttpProcessHandler(configuration, console, environment.project)
+        val processHandler = HttpProcessHandler(configuration, console)
         console.attachToProcess(processHandler)
 
         return DefaultExecutionResult(console, processHandler)
@@ -49,8 +37,7 @@ class HttpRunState(
 
 class HttpProcessHandler(
     private val configuration: HttpRunConfiguration,
-    private val console: com.intellij.execution.ui.ConsoleView,
-    private val project: Project,
+    private val console: com.intellij.execution.ui.ConsoleView
 ) : com.intellij.execution.process.ProcessHandler() {
 
     private val httpClient = HttpClient.newBuilder()
@@ -58,20 +45,15 @@ class HttpProcessHandler(
         .followRedirects(HttpClient.Redirect.NORMAL)
         .build()
 
-    private val terminated = AtomicBoolean(false)
-
-    @Volatile
-    private var job: Job? = null
-
     override fun startNotify() {
         super.startNotify()
-        val cs = SessionStorage.getInstance(project).cs
-        job = cs.launch(CoroutineName("inline-call:http-run:${configuration.url}")) {
+        
+        thread {
             executeRequest()
         }
     }
 
-    private suspend fun executeRequest() {
+    private fun executeRequest() {
         try {
             printToConsole("${configuration.method} ${configuration.url}\n", ConsoleViewContentType.SYSTEM_OUTPUT)
             printToConsole("Connecting...\n\n", ConsoleViewContentType.LOG_INFO_OUTPUT)
@@ -103,71 +85,54 @@ class HttpProcessHandler(
             }
 
             val request = requestBuilder.build()
-            val response = runInterruptible(Dispatchers.IO) {
-                httpClient.send(request, HttpResponse.BodyHandlers.ofString())
-            }
+            val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
 
-            withContext(NonCancellable + Dispatchers.EDT) {
-                printResponseOnEdt(response)
-            }
+            printResponse(response)
 
-            completeOnce(0)
-        } catch (ce: CancellationException) {
-            withContext(NonCancellable + Dispatchers.EDT) {
-                console.print("\n[Cancelled]\n", ConsoleViewContentType.SYSTEM_OUTPUT)
-            }
-            completeOnce(143)
-            throw ce
-        } catch (e: HttpTimeoutException) {
-            withContext(NonCancellable + Dispatchers.EDT) {
-                console.print("\n[Timeout: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
-            }
-            completeOnce(1)
         } catch (e: Exception) {
-            withContext(NonCancellable + Dispatchers.EDT) {
-                console.print("\n[Error: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
-            }
-            completeOnce(1)
+            printToConsole("\n[Error: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
+        } finally {
+            notifyProcessTerminated(0)
         }
     }
 
-    private fun printResponseOnEdt(response: HttpResponse<String>) {
+    private fun printResponse(response: HttpResponse<String>) {
         val statusType = when (response.statusCode()) {
             in 200..299 -> ConsoleViewContentType.SYSTEM_OUTPUT
             in 300..399 -> ConsoleViewContentType.LOG_WARNING_OUTPUT
             else -> ConsoleViewContentType.ERROR_OUTPUT
         }
 
-        console.print("HTTP ${response.statusCode()}\n", statusType)
+        printToConsole("HTTP ${response.statusCode()}\n", statusType)
 
         // Headers
-        console.print("\n--- Response Headers ---\n", ConsoleViewContentType.LOG_DEBUG_OUTPUT)
+        printToConsole("\n--- Response Headers ---\n", ConsoleViewContentType.LOG_DEBUG_OUTPUT)
         response.headers().map().forEach { (key, values) ->
             values.forEach { value ->
-                console.print("$key: $value\n", ConsoleViewContentType.LOG_INFO_OUTPUT)
+                printToConsole("$key: $value\n", ConsoleViewContentType.LOG_INFO_OUTPUT)
             }
         }
 
         // Body
-        console.print("\n--- Response Body ---\n", ConsoleViewContentType.LOG_DEBUG_OUTPUT)
-
+        printToConsole("\n--- Response Body ---\n", ConsoleViewContentType.LOG_DEBUG_OUTPUT)
+        
         val body = response.body()
         val contentType = response.headers().firstValue("content-type").orElse("")
-
+        
         // Pretty print JSON
         val displayBody = if (contentType.contains("json")) {
             tryPrettyPrintJson(body)
         } else {
             body
         }
-
-        console.print(displayBody, ConsoleViewContentType.NORMAL_OUTPUT)
+        
+        printToConsole(displayBody, ConsoleViewContentType.NORMAL_OUTPUT)
 
         if (body.length > 10000) {
-            console.print("\n\n[Response truncated, total size: ${body.length} bytes]", ConsoleViewContentType.LOG_WARNING_OUTPUT)
+            printToConsole("\n\n[Response truncated, total size: ${body.length} bytes]", ConsoleViewContentType.LOG_WARNING_OUTPUT)
         }
 
-        console.print("\n", ConsoleViewContentType.NORMAL_OUTPUT)
+        printToConsole("\n", ConsoleViewContentType.NORMAL_OUTPUT)
     }
 
     private fun tryPrettyPrintJson(json: String): String {
@@ -189,26 +154,18 @@ class HttpProcessHandler(
             }
     }
 
-    private suspend fun printToConsole(text: String, contentType: ConsoleViewContentType) {
-        withContext(Dispatchers.EDT) {
+    private fun printToConsole(text: String, contentType: ConsoleViewContentType) {
+        com.intellij.openapi.application.invokeLater {
             console.print(text, contentType)
         }
     }
 
-    private fun completeOnce(exitCode: Int) {
-        if (terminated.compareAndSet(false, true)) {
-            notifyProcessTerminated(exitCode)
-        }
-    }
-
     override fun destroyProcessImpl() {
-        job?.cancel()
-        completeOnce(143)
+        notifyProcessTerminated(1)
     }
 
     override fun detachProcessImpl() {
-        job?.cancel()
-        completeOnce(0)
+        notifyProcessTerminated(0)
     }
 
     override fun detachIsDefault(): Boolean = false
