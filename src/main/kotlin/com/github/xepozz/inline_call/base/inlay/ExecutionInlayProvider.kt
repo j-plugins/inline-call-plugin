@@ -76,10 +76,8 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
 
             val languageSpecificExtractors = allExtractors.filter { it !is AdapterLanguageExtractor }
             val extractors = languageSpecificExtractors.ifEmpty { allExtractors }
-            println("file: $file, extractors: ${extractors.map { it.javaClass }}")
 
             val blocks = extractors.flatMap { it.extract(file) }.ifEmpty { return emptyMap() }
-            println("blocks: ${blocks.map { it }}")
 
             val featureGenerators = FeatureGenerator.getApplicable(project).ifEmpty { return emptyMap() }
 
