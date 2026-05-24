@@ -1,7 +1,13 @@
 <idea-plugin>
     <extensions defaultExtensionNs="com.intellij">
-        <codeInsight.inlayProvider
+        <codeInsight.declarativeInlayProvider
                 language="Kotlin"
-                implementationClass="com.github.xepozz.inline_call.base.inlay.ExecutionInlayProvider"/>
+                implementationClass="com.github.xepozz.inline_call.base.inlay.ExecutionDeclarativeInlayProvider"
+                isEnabledByDefault="true"
+                group="OTHER_GROUP"
+                providerId="inline_call.execution"
+                bundle="messages.CallBundle"
+                nameKey="inlay.execution.name"
+                descriptionKey="inlay.execution.description"/>
     </extensions>
 </idea-plugin>
