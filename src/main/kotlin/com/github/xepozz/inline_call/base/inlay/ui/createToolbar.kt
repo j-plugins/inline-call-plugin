@@ -3,6 +3,7 @@ package com.github.xepozz.inline_call.base.inlay.ui
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.ActionToolbar
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
@@ -11,11 +12,11 @@ import com.intellij.openapi.ide.CopyPasteManager
 import java.awt.datatransfer.StringSelection
 import javax.swing.SwingConstants
 
-fun createToolbar(): ActionToolbar {
+fun createToolbar(contentProvider: () -> String): ActionToolbar {
     val copyAction = object : AnAction("Copy", "Copy output", AllIcons.Actions.Copy) {
+        override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT
         override fun actionPerformed(e: AnActionEvent) {
-            val content = "console.text"
-            CopyPasteManager.getInstance().setContents(StringSelection(content))
+            CopyPasteManager.getInstance().setContents(StringSelection(contentProvider()))
         }
     }
 
