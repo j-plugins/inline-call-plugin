@@ -4,10 +4,4 @@
                 language="Kotlin"
                 implementationClass="com.github.xepozz.inline_call.base.inlay.ExecutionInlayProvider"/>
     </extensions>
-
-    <extensions defaultExtensionNs="com.github.xepozz.inline_call">
-        <languageTextExtractor
-                order="last"
-                implementation="com.github.xepozz.inline_call.language.kotlin.KotlinLanguageExtractor"/>
-    </extensions>
 </idea-plugin>
