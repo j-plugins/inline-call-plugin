@@ -31,6 +31,15 @@ Issues to address before registration:
    published on the JetBrains Marketplace. We must lock the IDs in this PR
    and never rename them.
 
+> **Relationship to plan 03 (coroutines migration).** Pre-requisite 3 here is
+> an *interim* fix: we move off `kotlin.concurrent.thread` to
+> `Application.executeOnPooledThread` so the very first marketplace release
+> doesn't ship a non-daemon-thread leak. Plan 03 step 5 supersedes this with
+> `runInterruptible(Dispatchers.IO) { ... }` launched on `SessionStorage.cs`.
+> Plan 02 deliberately does **not** touch the `invokeLater`-based
+> `printToConsole` (that is plan 03 territory) — only the thread-creation
+> primitive is replaced.
+
 ## Pre-requisites (must fix BEFORE registration)
 
 These three fixes are independent and can land in separate commits. They MUST
@@ -98,7 +107,9 @@ Fix:
   the Kotlin UI DSL v2 so they participate in `isModified()` / `reset()`.
 - Bind through a snapshot model as in HTTP.
 - Attach a `FileChooserDescriptorFactory.createSingleFolderDescriptor()` to
-  the working-directory chooser.
+  the working-directory chooser. The DSL helper signature is
+  `textFieldWithBrowseButton(project: Project? = null, fileChooserDescriptor: FileChooserDescriptor? = null, ...)`;
+  pass the descriptor as a named argument.
 
 ### 2. `ConfigurationFactory.getId()` rename
 
@@ -124,6 +135,15 @@ its `ConfigurationType`. Proposed values:
 Important: changing `factory.id` *also* changes the serialization key, so
 this has to ship in the same PR as the initial registration. After the first
 public release the value is frozen forever.
+
+Note on `ConfigurationFactory.getName()`: by default
+`ConfigurationFactory.getName()` falls back to `getId()`, which is what the
+*Run/Debug Configurations* wizard shows when a type has more than one
+factory. Both of our types have a single factory, so the wizard shows the
+type display name (`"HTTP Request"` / `"Shell Command"`) and the factory
+name is never user-visible. We therefore leave `getName()` at its default
+and let it return `"HTTP"` / `"Shell"` — readable enough if a future feature
+adds a second factory under the same type.
 
 While we are in these files, also fix
 `ShellRunConfigurationType.getConfigurationTypeDescription()` — it currently
@@ -167,7 +187,12 @@ override fun destroyProcessImpl() {
 
 Also wrap the `httpClient.send(...)` call so that an `InterruptedException`
 from `cancel(true)` reports a clean "Cancelled" line on the console instead
-of a stack trace.
+of a stack trace. The existing `catch (e: Exception)` is broad enough to
+catch it; we just need an earlier, more specific `catch (e: InterruptedException)`
+(or `catch (e: HttpTimeoutException)` from the platform — `HttpClient.send`
+maps thread interruption to `HttpTimeoutException` on Java 21 in some
+implementations). Print a single `"\n[Cancelled]\n"` line, then fall
+through to the `finally` that calls `notifyProcessTerminated`.
 
 ## Implementation steps
 
@@ -190,10 +215,14 @@ ones being green.
    `Future`, cancel on destroy. Handle `InterruptedException`.
 5. **Commit 5 — Register both types and both producers in `plugin.xml`.**
    See the XML snippets below.
-6. **Commit 6 — Smoke test fixture (optional but recommended).**
-   Add one `LightPlatformTestCase` that calls
-   `ConfigurationTypeUtil.findConfigurationType(HttpRunConfigurationType::class.java)`
-   and asserts non-null — guards against the registration regressing.
+6. **Commit 6 — Smoke test fixture (deferred to follow-up).**
+   `LightPlatformTestCase`-based registration smoke tests would guard against
+   the registration regressing, but adding the first one wires up the entire
+   platform test fixture (heavy first run, longer CI). Tracked as follow-up
+   in the next plan revision; out of scope for the PR that registers the
+   types. `./gradlew :verifyPluginProjectConfiguration` already validates
+   that the `<configurationType>` and `<runConfigurationProducer>` extension
+   declarations are well-formed.
 
 ## plugin.xml registration
 
