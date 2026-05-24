@@ -10,7 +10,6 @@ import com.github.xepozz.inline_call.base.handlers.ExecutionState
 import com.github.xepozz.inline_call.base.inlay.ui.createResultContainer
 import com.github.xepozz.inline_call.base.inlay.ui.embedContainerIntoEditor
 import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
-import com.intellij.codeInsight.daemon.impl.InlayHintsPassFactoryInternal
 import com.intellij.codeInsight.hints.ChangeListener
 import com.intellij.codeInsight.hints.FactoryInlayHintsCollector
 import com.intellij.codeInsight.hints.ImmediateConfigurable
@@ -265,8 +264,8 @@ class ExecutionInlayProvider : InlayHintsProvider<NoSettings> {
 
         private fun refreshInlays(editor: Editor) {
             invokeLater {
-                InlayHintsPassFactoryInternal.forceHintsUpdateOnNextPass()
-                DaemonCodeAnalyzer.getInstance(editor.project ?: return@invokeLater).restart()
+                val project = editor.project ?: return@invokeLater
+                DaemonCodeAnalyzer.getInstance(project).restart(file)
             }
         }
     }
