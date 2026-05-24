@@ -1,417 +1,234 @@
 # 04 — Real OffsetMapping for multi-line and decorated comments
 
-Status: draft
+Status: draft.
 Scope: `base/api/OffsetMapping.kt`, `base/api/BaseLanguageTextExtractor.kt`,
-language-specific extractors (`language/{php,xml,yaml}/*Extractor.kt`).
-Out of scope: heredoc/nowdoc, string concatenation, template literals.
+language extractors (`language/{php,xml,yaml}/*Extractor.kt`), feature
+adapters (`feature/{shell,http}/*Adapter.kt`).
+Out of scope: heredoc/nowdoc, string concatenation, template literals,
+XML CDATA, kotlin `""" ... """`.
 
 ## Problem
 
-`OffsetMapping.Identity` assumes `block.text[i]` corresponds to
-`document.getText(block.originalRange)[i]` — i.e. the normalized text fed to
-the regexp matcher is byte-for-byte the same slice of the document that the
-inlay/highlighter will later use via `originalRange.startOffset + match.offset`.
+`OffsetMapping.Identity` assumes `block.text[i]` corresponds 1:1 to
+`document.getText(block.originalRange)[i]`. `BaseLanguageTextExtractor.extract()`
+builds the block from `element.text` verbatim (with comment decoration) and
+hard-codes `OffsetMapping.Identity`. Both adapters do
+`startOriginal = base + block.mapping.toOriginal(m.offset)` —
+correct only while the normalized text equals the original slice.
 
-`BaseLanguageTextExtractor.extract()` today builds the block from
-`element.text` verbatim:
+This is correct today by accident: regexps (`shell:\s*(.+)`, the URL
+pattern) match in the *middle* of comment text where decoration has already
+been skipped by leading whitespace in the pattern itself, so no
+normalization is needed and identity holds. The bug is *latent*: as soon as
+we want any of the features below, identity breaks.
 
-```kotlin
-val text = element.text                          // PHPDoc: "/**\n * shell: echo 1\n */"
-val textRange = element.text.findTextRange(text)?.shiftRight(element.textOffset)
-ExtractedBlock(element, textRange, text, OffsetMapping.Identity)
-```
-
-Both `ShellFeatureAdapter` and `HttpFeatureAdapter` (lines 33 and 43
-respectively) then do:
-
-```kotlin
-val startOriginal = base + block.mapping.toOriginal(m.offset)
-```
-
-That assignment is correct only while the normalized text equals the original
-text. The moment we want to strip comment decoration to make the regexp robust,
-identity breaks.
-
-Concrete breakage scenarios:
-
-1. **PHPDoc `/** ... */`** — each line begins with optional whitespace plus
-   `*` plus optional space. If we strip the `*` so that `shell:\s*(.+)` matches
-   `shell: echo 123`, the offset in the stripped text is N characters earlier
-   than in the document text. Currently the regexp *does* match (because `*`
-   is not in the way of `shell:`), but `m.value` ends up containing trailing
-   junk (`echo 123\n */`) because `(.+)` is greedy and `*/` is on the next
-   chunk after `\n`. The dot does not cross `\n`, so on the multi-line
-   PHPDoc the captured value is `echo 123` followed by trailing whitespace
-   that `trim()` removes — by accident this looks fine. The bug surfaces as
-   soon as we want to support **multi-line values** or **strip leading `*`**
-   so `shell:` works when written `* shell: cmd`.
-
-2. **XML comments `<!-- ... -->`** — `element.text` includes `<!--` and
-   `-->`. A URL placed at the very start (`<!--https://...-->`) needs
-   `mapping.toOriginal(0) == 4` so the highlight does not land on `<!--`.
-   Identity highlights the opening bracket.
-
-3. **YAML block comments** — several `#` lines glued together. To match
-   `shell:` written on line 2 of a comment block, we need to drop `# ` from
-   every line; then offsets shift by `2 * line_index`.
-
-4. **PHP `//` single-line** — prefix `//` plus optional space. Already
-   broken for `//shell: cmd` (no space): regexp matches at offset 2 in
-   normalized text but document has it at offset 2 anyway, so it accidentally
-   works. The hidden coupling will bite once we introduce normalization for
-   PHPDoc and reuse the same code path.
-
-5. **PHP `#` single-line and `#[...]` attributes** — `#[` is an attribute,
-   not a comment, and `PsiTreeUtil.findChildrenOfAnyType(PsiComment)` already
-   filters attributes out. `#` comments behave like `//`.
-
-Out of scope: PHP/JS concatenation `"shell: " . $cmd`, heredoc/nowdoc,
-template literals, `kotlin """ """`. These need a different extraction
-strategy (PSI walk into string-literal parts) and a separate plan.
+1. **PHPDoc `/** ... */` with `*` line prefix**. To match `shell:` on a
+   line written `* shell: echo 1`, the natural fix is to strip
+   `^\s*\*\s?` from each interior line so the regexp sees clean
+   `shell: echo 1`. Then `m.offset` in the stripped text is N characters
+   ahead of the document position; identity points the inlay at a `*`.
+2. **XML comments `<!-- ... -->`**. A URL at the very start
+   (`<!--https://...-->`) needs `mapping.toOriginal(0) == 4`. Identity
+   highlights the opening bracket.
+3. **YAML multi-line `#` blocks**. Several `#` lines glued into one block
+   need `# ` stripped from every line; offsets shift by `2 * line_index`.
+4. **PHP `//cmd` (no space)** — works today by coincidence; relies on the
+   fact we do not strip `//`. The hidden coupling will fail the moment we
+   reuse the same normalization pipeline for PHPDoc.
 
 ## Reproduction
 
-File: `playground/1.php`
+`playground/1.php`:
 
 ```php
-<?php
-
 /**
  * shell: echo 123
  */
-
-/**
- * shell: echo 123
- */
-// https://example.com
 ```
 
 Steps:
+1. Open in IDE; observe shell inlay on line 2.
+2. The current matcher sees `* shell: echo 123` and matches starting at
+   offset 5 (after `* `). Identity maps 5 -> 5 in the document. The
+   document also has `* ` there, so the inlay lands at the right place by
+   coincidence.
+3. To make this matcher robust we want to **strip the `* ` prefix** so
+   `shell:\s*(.+)` matches even if the author writes `*shell: cmd` (no
+   space). After stripping, `m.offset == 0` in normalized text but the
+   correct document offset is 5. Identity now points the inlay at `*`.
 
-1. Open `playground/1.php` in an IDE with the plugin installed.
-2. Observe the `shell:` inlay/run-gutter on lines 4 and 8.
-3. Click run. The captured value visible in the console title is
-   `echo 123` — looks OK.
-4. Change the second PHPDoc to:
-
-   ```php
-   /** shell: echo 123 */
-   ```
-
-   Now the regexp matches at offset 4 in normalized text. The highlight in the
-   editor still lands at offset 4 inside `element.textRange` — which is
-   `shell` — so it looks right *by accident* because the leading `/**` is
-   exactly 3 chars and the space makes offset 4.
-
-5. Edit it to a non-`/** */` form, e.g.:
-
-   ```php
-   /**
-    *shell: echo 123
-    */
-   ```
-
-   (no space after `*`). The regexp still matches, but `m.offset` now points
-   to the position of `s` inside `element.text`, which is *after* the
-   leading `\n * `. Identity maps that 1:1 to document offsets, which happens
-   to be correct here too — because we never stripped anything. So the
-   *currently visible* bug is small; the *latent* bug is that the moment we
-   strip `* ` from every line to make richer matching possible, all of these
-   offsets shift and Identity becomes wrong.
-
-A clearer immediate-failure reproduction once we add stripping:
+Fast failure repro once stripping is enabled:
 
 ```php
 /**
  * Line one
  * shell: echo 42
- * Line three
  */
 ```
 
-If we normalize to `Line one\nshell: echo 42\nLine three\n`, the regexp
-matches at offset 9. With Identity that lands in the middle of
-`* Line one\n` in the document — visibly wrong inlay placement.
+Normalized: `Line one\nshell: echo 42`. Match at normalized offset 9; raw
+text has `shell` at document offset 16 (3 for `/**`, 1 newline, 4 spaces +
+`* `). Identity: 9. Correct: 16.
 
-File: `playground/1.yaml`
-
-```yaml
-services:
- http:
- console:
-  # shell: echo 123
-  - runner
-```
-
-Only one `#` line, so identity holds. Add a second:
+`playground/1.yaml`:
 
 ```yaml
   # shell: echo 123
-  # https://example.com
 ```
 
-PSI gives two `PsiComment` siblings, so each is handled independently and
-Identity still holds per block. Identity breaks only if we choose to glue
-adjacent `#` lines into one logical block (planned for YAML, see below).
+Single line, identity holds. Adding a sibling `# https://example.com`
+produces two independent `PsiComment`s; still fine. Identity breaks only
+once we glue them into one block (Step 7) or once we strip `# ` from a
+single line (Step 5).
 
 ## Mapping model
 
 Requirements:
+- `toOriginal(normalizedOffset)` cheap and correct for every offset the
+  matcher emits (match start and `start + value.length`).
+- `toNormalized(originalOffset)` defined; clamp right when the original
+  offset lands on a stripped char.
+- Must handle `normalizedOffset == text.length` (end sentinel).
 
-- `toOriginal(normalizedOffset)` must be cheap and correct for every offset
-  the matcher can emit (start of a match and end-of-match, i.e. start+length).
-- `toNormalized(originalOffset)` is currently unused by adapters, but it is
-  part of the interface and useful for "caret is inside a match" checks; keep
-  it.
-- Must support the case where the matcher returns offsets at the very end of
-  the normalized text (offset == `text.length`).
-- Should round-trip exactly when applied to an offset that lies on a kept
-  character.
-- For offsets that fall on stripped characters (e.g. someone passes the
-  position of a `*` prefix), define the behavior: clamp to the nearest kept
-  character on the right.
-
-Chosen shape: **dense piecewise-linear mapping built from a sorted list of
-segments**.
+Chosen shape: **dense piecewise-linear mapping** built from a sorted list
+of segments. Each segment is a contiguous run kept in both texts; gaps
+between segments are stripped decoration in the *original* text.
 
 ```kotlin
-/**
- * Maps offsets between normalized text (fed to matchers) and original PSI
- * text (used for editor coordinates).
- *
- * Built from a list of [Segment]s. Each segment describes a contiguous run
- * of characters that exists in both texts; consecutive segments may have
- * gaps in the original text (stripped decoration), but never in the
- * normalized text.
- */
 class SegmentedOffsetMapping(
     private val segments: List<Segment>,
     private val normalizedLength: Int,
     private val originalLength: Int,
 ) : OffsetMapping {
-    /**
-     * @param normalizedStart  inclusive offset in normalized text
-     * @param originalStart    inclusive offset in original text
-     * @param length           number of chars common to both
-     */
     data class Segment(val normalizedStart: Int, val originalStart: Int, val length: Int)
-    // binary search by normalizedStart for toOriginal, by originalStart for toNormalized
 }
 ```
 
-Properties:
-
-- Segments are sorted by `normalizedStart`; lookup is `O(log n)`.
-- For a normalized offset `o` inside segment `s`:
-  `toOriginal(o) = s.originalStart + (o - s.normalizedStart)`.
-- For `o == normalizedLength` (end-of-text sentinel): return
-  `originalLength`. Adapters use this when computing
-  `startOriginal + m.value.length` — but note that the **length is taken
-  from `m.value`, not from a mapped end-offset**, so we need a different
-  fix (see "Length handling" below).
-- For `o` in a gap between segments (only happens via `toNormalized` on
-  stripped chars): clamp right to the next segment's start.
+- Sorted by `normalizedStart`; binary search is `O(log n)`.
+- Inside segment `s`: `toOriginal(o) = s.originalStart + (o - s.normalizedStart)`.
+- At `o == normalizedLength`: return `originalLength`.
+- `toNormalized` on a stripped char clamps to the next segment's
+  `normalizedStart`.
 
 ### Length handling
 
-Today: `endOriginal = startOriginal + m.value.length`. That is wrong as soon
-as the original spans more chars than the normalized value (e.g. value
-contains a `\n` that was preserved but the original has `\n * ` between two
-captured pieces — though for the in-scope cases this does not happen because
-all stripped chars are at line starts and `(.+)` does not cross `\n`).
+Today `endOriginal = startOriginal + m.value.length`. That stays correct
+while each match lies inside one segment. Phase 1 patterns use `(.+)` (no
+newline), and all decoration we strip is at line boundaries — so matches
+never cross gaps. Still, **migrate adapters to**
+`endOriginal = base + mapping.toOriginal(m.offset + m.value.length)` so
+multi-line patterns are not a future trap. Add a debug assertion that
+`endOriginal - startOriginal >= m.value.length`.
 
-For Phase 1 we keep matches single-line (`(.+)` is the dot, no `\n`).
-Therefore each match lies entirely inside one segment, and
-`startOriginal + m.value.length` stays correct. We add an assertion in debug
-builds: `require(mappingSegmentOf(start) == mappingSegmentOf(start + len))`.
+### Why not a function or parallel `IntArray`s?
 
-For multi-line matches (future, out of scope) compute
-`endOriginal = mapping.toOriginal(m.offset + m.value.length)`. Adapter code
-should already be migrated to that form preemptively — it is one extra call
-and keeps single-line and multi-line paths identical. **This is a required
-adapter change** (see step 4).
-
-### Why not a function or two parallel int arrays?
-
-- Function (`(Int) -> Int`): cannot answer the inverse direction without
-  scanning; serialization-unfriendly; harder to debug.
-- Two parallel `IntArray`s: faster than `List<Segment>` and worth doing if
-  profiling shows it, but Phase 1 prioritizes clarity. We can swap the
-  backing store later without touching callers.
+Function form cannot answer the inverse direction; serialization-unfriendly;
+hard to debug. Parallel `IntArray`s are faster, worth the swap later
+if profiling demands it — the public API does not change.
 
 ## Per-language strategy
 
-Each language extractor knows its own decoration. Approach: extractor
-returns the raw `PsiComment` text, then a per-language `CommentNormalizer`
-strips decoration and emits both the normalized text and the segment list.
+Each language extractor returns the raw `PsiComment` text; a per-language
+`CommentNormalizer` strips decoration and emits both the normalized text
+and the segment list.
 
 ```kotlin
-interface CommentNormalizer {
-    fun normalize(rawText: String): NormalizedComment
-}
-data class NormalizedComment(
-    val text: String,
-    val mapping: SegmentedOffsetMapping,
-)
+interface CommentNormalizer { fun normalize(rawText: String): NormalizedComment }
+data class NormalizedComment(val text: String, val mapping: SegmentedOffsetMapping)
 ```
 
-The `BaseLanguageTextExtractor` no longer hard-codes `OffsetMapping.Identity`;
-subclasses pass a normalizer:
-
-```kotlin
-abstract class BaseLanguageTextExtractor(
-    private val normalizer: CommentNormalizer = IdentityNormalizer,
-) : LanguageTextExtractor { ... }
-```
+`BaseLanguageTextExtractor` ctor accepts a normalizer (default
+`IdentityNormalizer`).
 
 ### XML (`<!-- ... -->`)
 
-Strip:
-
-- Leading `<!--` (4 chars).
-- Trailing `-->` (3 chars).
-- One optional space after `<!--` and before `-->` (cosmetic; do not strip
-  more than one).
-
-CDATA (`<![CDATA[ ... ]]>`) is **not** a `PsiComment`; it is `XmlText`/
-`CDATA` token. Out of scope for this iteration — extractor would need to
-also look at `XmlText` nodes, separate plan.
-
-Segments: one segment for the inner range `[4, length - 3)` (or adjusted for
-the optional inner spaces).
-
-Multi-line XML comments are common:
-
-```xml
-<!--
-  shell: echo 1
-  https://example.com
--->
-```
-
-No per-line decoration in XML, so a **single segment** still suffices. Leading
-indentation on inner lines is preserved in the normalized text (the regexp
-handles `\s*` itself).
+Strip leading `<!--` (4 chars) and trailing `-->` (3 chars). Optionally
+strip one space after `<!--` and before `-->`. One segment for the inner
+range. Multi-line XML comments have no per-line decoration, so one segment
+is enough; interior indentation stays in normalized text and the regexp
+handles `\s*` itself. CDATA is not a `PsiComment` (separate plan).
 
 ### PHP (`/** ... */`, `/* ... */`, `//`, `#`)
 
-PSI element type tells us which one:
+Dispatch on PSI element class inside `PHPLanguageExtractor.extract()`:
 
-- `PhpDocComment` / `PhpDocType.DOC_COMMENT`: PHPDoc, strip `*` line prefixes.
-- `PhpTokenTypes.C_STYLE_COMMENT` (`/* ... */`): like PHPDoc minus the
-  per-line `*` decoration (rarely decorated).
-- `PhpTokenTypes.LINE_COMMENT` (`//`, `#`): strip the leading marker plus
-  one optional space.
+- `PhpDocComment` -> `CStyleBlockNormalizer(stripStarPrefix = true)`
+- `PhpTokenTypes.C_STYLE_COMMENT` (`/* ... */`) -> `CStyleBlockNormalizer(stripStarPrefix = false)`
+- line comment -> `SingleLineCommentNormalizer("//|#")`
 
-PHPDoc normalization rules:
-
-1. Strip leading `/**` (3 chars) and any whitespace up to and including the
-   first `\n` (preserve the `\n` itself as part of normalized text? — **no**,
-   drop it; first content line starts at offset 0 of normalized text).
+PHPDoc normalization:
+1. Strip leading `/**` and any whitespace up to and including the first
+   `\n` (drop the `\n` too; first content line starts at normalized
+   offset 0).
 2. Strip trailing whitespace + `*/`.
-3. For each interior line: strip leading `\s*\*\s?` (regex: at most one
-   space after the `*` — matches `phpDocumentor` style; do not strip more
-   because indentation inside `@example` blocks is significant).
-4. Preserve `\n` between content lines.
+3. Each interior line: strip `^\s*\*\s?` — at most one space after `*`,
+   so indentation inside `@example` stays.
+4. Emit each surviving `\n` as a 1-char segment between content segments.
 
-Example:
+Example. Raw `"/**\n * Line one\n * shell: echo 42\n */"` becomes
+normalized `"Line one\nshell: echo 42"` with segments (illustrative):
 
 ```
-Raw:        "/**\n * Line one\n * shell: echo 42\n * Line three\n */"
-Normalized: "Line one\nshell: echo 42\nLine three"
-
-Segments (normalizedStart, originalStart, length):
-  (0,  7,  8)   // "Line one"
-  (8,  15, 1)   // "\n"
-  (9,  20, 14)  // "shell: echo 42"
-  (23, 34, 1)   // "\n"
-  (24, 39, 10)  // "Line three"
+(0,  7,  8)   // "Line one"
+(8,  15, 1)   // "\n"
+(9,  20, 14)  // "shell: echo 42"
 ```
 
-(Numbers illustrative; correct values come from the parser; see step 2.)
+Implementation: line-by-line scan, regex `^\s*\*\s?` anchored, two
+cursors `originalCursor` and `normalizedCursor`. `\r\n` and `\n` both count
+as one line terminator for stripping purposes; the original bytes still
+contribute to `originalCursor` so document offsets stay accurate.
 
-Implementation: scan the raw text line by line, tracking
-`originalCursor` and `normalizedCursor`. For each line, find the boundary
-between decoration and content with a single regex
-`^\s*\*\s?` (anchored), emit one segment for the content slice, advance
-both cursors. Newlines between lines are emitted as 1-char segments so the
-matcher can still see line breaks.
-
-`//` and `#`: strip leading `//` or `#`, then at most one space. One
-segment.
+`//` and `#`: strip leading marker plus at most one space. One segment.
 
 ### YAML (`# ...`)
 
-Single `#` comment line: same as PHP `//`.
+`SingleLineCommentNormalizer("#")`. Strip leading `\s*#\s?`. One segment.
 
-Block of consecutive `#` lines (same column? — yes, otherwise treat as
-independent): glue into one logical block. Strip `^\s*#\s?` from each line,
-preserve `\n` between them.
-
-PSI shape: `YAMLPsiElement` produces one `PsiComment` per line. To glue
-them we need to either:
-
-- (a) walk `element.nextSibling` while it is whitespace-or-comment and the
-  whitespace contains exactly one `\n`, accumulating; or
-- (b) override `extract` in `YamlLanguageExtractor` to group siblings before
-  delegating to the normalizer.
-
-Choose (b) — keeps the base extractor simple. Group key: same indentation
-column, contiguous (no blank line, no non-comment node between).
-
-For Phase 1 of this plan, **do not glue** YAML comments yet — each
-`PsiComment` is one block. This keeps Identity-correct unless we strip the
-`#`. We *will* strip the `#` (single-line normalizer), so YAML still needs
-the segmented mapping; just no cross-line concern.
+**Do not glue** sibling `#` comments in Phase 1 — each `PsiComment` is one
+block. Gluing is Step 7 (optional).
 
 ### Adapter (fallback)
 
-`AdapterLanguageExtractor` handles every other language. We do not know the
-comment syntax, so we cannot strip safely. Use `IdentityNormalizer`: emit a
-single segment `(0, 0, text.length)`. Behavior is identical to today.
+`AdapterLanguageExtractor` uses `IdentityNormalizer`: single segment
+`(0, 0, text.length)`. Behavior identical to today.
 
 ## Implementation steps
 
 Each step is one commit; CI must pass at every step.
 
-### Step 1 — Introduce `SegmentedOffsetMapping` (no behavior change)
+### Step 1 — `SegmentedOffsetMapping` (no behavior change)
 
-- Add `base/api/SegmentedOffsetMapping.kt` with `Segment`, binary-search
-  lookup, factory `SegmentedOffsetMapping.identity(length)`.
-- Add unit tests in
-  `src/test/kotlin/.../base/api/SegmentedOffsetMappingTest.kt`:
-  - identity round-trip;
-  - single-segment with leading gap (`<!--` case);
-  - multi-segment with per-line gaps (`/** * ... */` case);
-  - boundary offsets (0, length, gap edges);
-  - inverse direction `toNormalized` clamping behavior.
-- `OffsetMapping.Identity` stays for now (back-compat).
+Add `base/api/SegmentedOffsetMapping.kt` with `Segment`, binary-search
+`toOriginal`/`toNormalized`, factory `SegmentedOffsetMapping.identity(length)`.
+Unit tests in `SegmentedOffsetMappingTest`:
+- identity round-trip;
+- single-segment with leading gap (XML);
+- multi-segment with per-line gaps (PHPDoc);
+- boundary offsets (0, `length`, gap edges);
+- `toNormalized` clamping on stripped chars.
 
-### Step 2 — Introduce `CommentNormalizer` SPI
+`OffsetMapping.Identity` stays (back-compat).
 
-- Add `base/api/CommentNormalizer.kt` (interface + `NormalizedComment`
-  data class).
-- Add `base/normalizers/IdentityNormalizer.kt` (returns text as-is + identity
-  mapping).
-- Add `base/normalizers/SingleLineCommentNormalizer.kt` parameterized by
-  marker pattern (`//`, `#`, `--`, ...). Strips `^\s*<marker>\s?`.
-- Add `base/normalizers/CStyleBlockNormalizer.kt` for `/* ... */` and
-  `/** ... */`. Constructor flag `stripStarPrefix: Boolean`.
-- Add `base/normalizers/XmlCommentNormalizer.kt` for `<!-- ... -->`.
-- Unit-test each normalizer with hand-written input/expected pairs **and**
-  property test: for every offset `i` in normalized text,
-  `original[mapping.toOriginal(i)] == normalized[i]` (when both indices are
-  in range and the char is not stripped).
+### Step 2 — `CommentNormalizer` SPI + normalizers
+
+Files: `base/api/CommentNormalizer.kt`, `base/normalizers/{Identity,SingleLine,CStyleBlock,XmlComment}Normalizer.kt`.
+
+`SingleLineCommentNormalizer(markerRegex: String)`: strips `^\s*<marker>\s?`.
+`CStyleBlockNormalizer(stripStarPrefix: Boolean)`: handles `/* ... */`
+and PHPDoc as described.
+`XmlCommentNormalizer`: strips `<!--` / `-->` with one optional inner
+space.
+
+Unit tests per normalizer with hand-written fixtures plus a property test:
+for every preserved index `i`, `original[mapping.toOriginal(i)] == normalized[i]`.
 
 ### Step 3 — Wire normalizer into `BaseLanguageTextExtractor`
 
-- Change ctor to accept `CommentNormalizer` (default
-  `IdentityNormalizer`).
-- In `extract()`, for each `PsiComment`:
-  - call `normalizer.normalize(element.text)`;
-  - build `ExtractedBlock(element, originalRange, normalized.text,
-    normalized.mapping)`.
-- `AdapterLanguageExtractor` keeps default; behavior unchanged.
+Change ctor to `BaseLanguageTextExtractor(normalizer: CommentNormalizer = IdentityNormalizer)`.
+In `extract()` call `normalizer.normalize(element.text)` and pass
+`normalized.text` / `normalized.mapping` into `ExtractedBlock`.
+`AdapterLanguageExtractor` keeps the default; behavior unchanged.
 
 ### Step 4 — Migrate adapters to map end-offsets via mapping
 
@@ -422,33 +239,27 @@ val startOriginal = base + block.mapping.toOriginal(m.offset)
 val endOriginal   = base + block.mapping.toOriginal(m.offset + m.value.length)
 ```
 
-Add assertion (debug only) that
-`endOriginal - startOriginal >= m.value.length` (original may be longer due
-to stripped decoration; never shorter).
+Debug assertion: `endOriginal - startOriginal >= m.value.length`.
 
 ### Step 5 — Per-language wiring
 
-- `PHPLanguageExtractor`: pick normalizer by PSI token type. Easiest path:
-  override `extract()` and dispatch on `element` class. Token-type-based
-  registry inside `BaseLanguageTextExtractor` is overkill for three cases.
-  - `PhpDocComment` -> `CStyleBlockNormalizer(stripStarPrefix = true)`
-  - `PhpTokenTypes.C_STYLE_COMMENT` -> `CStyleBlockNormalizer(stripStarPrefix = false)`
-  - else (line comments) -> `SingleLineCommentNormalizer("//|#")`
 - `XmlLanguageExtractor`: pass `XmlCommentNormalizer` to base ctor.
-- `YamlLanguageExtractor`: pass `SingleLineCommentNormalizer("#")`. **Do
-  not glue** sibling comments in this step.
+- `YamlLanguageExtractor`: pass `SingleLineCommentNormalizer("#")`.
+- `PHPLanguageExtractor`: override `extract()` to dispatch by PSI class
+  (PHPDoc / C-style / line) and pick the matching normalizer per element.
 
-### Step 6 — Delete `OffsetMapping.Identity` usages from production code
+### Step 6 — Tidy up Identity usages
 
-Keep `OffsetMapping.Identity` as a convenience for tests and the
-`IdentityNormalizer`. Grep the repo to confirm no other call sites construct
-it directly outside normalizers.
+Mark `OffsetMapping.Identity` `@Deprecated("Use IdentityNormalizer")`.
+Grep production code; no direct call sites must remain outside normalizers
+and tests.
 
 ### Step 7 — Optional: YAML comment gluing
 
-Separate commit; only land if Phase 1 leaves obvious gaps. Detect
-contiguous same-column `PsiComment` siblings, build one block whose
-`originalRange` spans them all, run `SingleLineCommentNormalizer` line-by-line.
+Detect contiguous same-column `PsiComment` siblings (no blank line, no
+non-comment node between), build one block spanning all of them, normalize
+each line. Defer until a real use case appears; touches the inlay
+provider's per-comment anchoring assumption.
 
 ## Test plan
 
@@ -462,77 +273,68 @@ src/test/testData/extractors/
     block_comment.php
     block_comment.expected.txt
     phpdoc_single_line.php
-    phpdoc_single_line.expected.txt
     phpdoc_multi_line.php
-    phpdoc_multi_line.expected.txt
     phpdoc_no_space_after_star.php
-    phpdoc_no_space_after_star.expected.txt
+    phpdoc_crlf.php
   xml/
     single_line.xml
     multi_line.xml
+    url_no_space.xml
   yaml/
     single.yaml
-    multiple_siblings.yaml
+    indented.yaml
 ```
 
-`*.expected.txt` format (one block per record):
+`*.expected.txt` records one block per fixture:
 
 ```
-ORIGINAL:    "/** shell: echo 1 */"   # quoted, escapes visible
+ORIGINAL:    "/** shell: echo 1 */"
 NORMALIZED:  "shell: echo 1"
-MATCH:       "shell:" feature=shell value="echo 1"
+MATCH:       feature=shell value="echo 1"
              normalized=[0,13) original=[4,17)
 ```
 
 Tests:
 
-1. **Extractor parametrized tests** (`PhpExtractorTest`, `XmlExtractorTest`,
-   `YamlExtractorTest`): load file, run extractor, assert
-   `block.text == expected.normalized` and segment list matches expected
-   ranges.
-2. **End-to-end adapter tests**: load file, run extractor + adapter,
-   assert `FeatureMatch.originalRange` matches expected document offsets.
-   Use `BasePlatformTestCase` so `PsiFile` is real; assert that
-   `editor.document.getText(match.originalRange) == match.value` (this is
-   the invariant Identity violates today).
-3. **Property test** in `SegmentedOffsetMappingTest`: random insertions
-   of `*`/`#` decoration, verify round-trip on every preserved index.
-4. **Regression test for `playground/1.php` scenario**: load the file,
-   assert two shell matches at the expected document offsets.
+1. **Normalizer tests** (`*NormalizerTest`): parametrized over fixtures;
+   assert normalized text and segment list.
+2. **Extractor tests** (`PhpExtractorTest`, `XmlExtractorTest`,
+   `YamlExtractorTest`) on `BasePlatformTestCase`: load fixture, run
+   extractor, assert `block.text` and `block.originalRange` are correct.
+3. **Adapter end-to-end** (`ShellAdapterMappingTest`,
+   `HttpAdapterMappingTest`): load fixture, run adapter,
+   assert `editor.document.getText(match.originalRange) == match.value` —
+   this is the invariant Identity violates.
+4. **Property test** in `SegmentedOffsetMappingTest`: generate random
+   inputs with `*`/`#`/CRLF decoration, verify round-trip on every
+   preserved index plus clamping on every gap index.
+5. **Regression** for `playground/1.php`: load file, assert two shell
+   matches at expected document offsets.
 
-CI hooks: add the testData paths to the existing `MyPluginTest` runner if
-it gates on a fixture directory; otherwise no harness changes needed.
+No harness changes; `MyPluginTest` already drives the existing fixture
+folder. Add new fixtures next to it.
 
 ## Risks
 
-- **Greedy regexp meets multi-segment text.** `(.+)` does not cross `\n`,
-  so a match cannot today span a stripped gap. If anyone changes the
-  pattern to `(.+?)` with DOTALL or `(?s)(.+)`, a match could span
-  multiple segments and `m.value.length` would no longer equal
-  `endOriginal - startOriginal`. Mitigation: Step 4 already routes
-  end-offset through the mapping; the in-debug assertion will catch
-  mismatches early.
-- **PHPDoc layouts in the wild are inconsistent.** Some authors use no
-  space after `*`, some use multiple, some indent `* ` deeper inside
-  `@example`. The regex `^\s*\*\s?` strips at most one space, preserving
-  inner indentation. Verify with at least three real-world snippets in
-  testData (Symfony, Laravel, Yii style).
-- **Performance on large files.** Each `PsiComment` allocates a fresh
-  `SegmentedOffsetMapping`. For a file with thousands of comments this is
-  still a few hundred KB of `Segment` objects — acceptable. If profiling
-  shows pressure, switch the backing store to two parallel `IntArray`s
-  and intern `IdentityMapping` for single-segment cases.
-- **YAML gluing (Step 7) interacts with the inlay provider.** Today the
-  inlay is attached per `PsiComment`. A glued block spans multiple
-  comments; the provider would need to either pick the first comment as
-  the anchor or be taught about multi-comment blocks. Defer until needed.
-- **PSI quirks**: `PhpDocComment.text` sometimes contains `\r\n` on
-  Windows-checked-out files. Normalizer must treat `\r\n` and `\n` as a
-  single line terminator for the purpose of stripping the next `* `
-  prefix, but preserve the original bytes in the segment so document
-  offsets stay correct. Cover with a Windows-style fixture.
-- **Inverse direction**: `toNormalized` on a stripped char (e.g. caret
-  inside `<!--`) returns the next kept index. Document this contract;
-  callers must not assume the result equals input.
-- **`OffsetMapping.Identity` deprecation**: leave a `@Deprecated` hint
-  pointing at `IdentityNormalizer` to discourage new call sites.
+- **Greedy `.+` and segment boundaries**. Phase 1 patterns never cross
+  `\n`, so matches never cross stripped gaps. If a future pattern uses
+  `(?s)` or `(.+?)\n.../s`, `m.value.length` can drift from
+  `endOriginal - startOriginal`. Mitigation: Step 4 already routes end
+  through the mapping; debug assertion catches regressions.
+- **PHPDoc layouts in the wild are messy**. No space after `*`, multiple
+  spaces, deep indent inside `@example`. Regex `^\s*\*\s?` strips at most
+  one space; verify with Symfony / Laravel / Yii snippets in testData.
+- **Performance**. Each `PsiComment` allocates a fresh
+  `SegmentedOffsetMapping`. Acceptable for typical files; swap to
+  `IntArray`-backed segments if profiling shows pressure. Single-segment
+  cases can intern an `IdentityMapping` per length cache.
+- **YAML gluing (Step 7) touches the inlay provider**. The provider
+  anchors on a single `PsiComment`; a glued block spans multiple. Either
+  pick the first comment as the anchor or teach the provider about
+  multi-element blocks. Defer.
+- **CRLF**. `PhpDocComment.text` on Windows-checked-out files contains
+  `\r\n`. Normalizer must treat `\r\n` and `\n` uniformly for stripping
+  but keep both bytes in `originalCursor`. Cover with `phpdoc_crlf.php`.
+- **`toNormalized` contract**. For a stripped original offset we clamp
+  right. Document this; callers must not assume round-trip equality on
+  arbitrary inputs.
