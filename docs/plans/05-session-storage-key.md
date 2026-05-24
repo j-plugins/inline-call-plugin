@@ -1,8 +1,13 @@
 # 05 — Stable session key and lifecycle
 
-Status: proposed
+Status: refined (post self-review)
 Owner: inline-call plugin
-Touches: `base/SessionStorage.kt`, `base/inlay/Session.kt`, `base/inlay/ExecutionInlayProvider.kt`
+Touches: `base/SessionStorage.kt`, `base/inlay/Session.kt`,
+`base/inlay/ExecutionInlayProvider.kt`, new
+`base/lifecycle/SessionLifecycleListener.kt`,
+`base/lifecycle/SessionPsiChangeListener.kt`,
+`base/lifecycle/SessionEditorFactoryListener.kt`,
+`META-INF/plugin.xml`
 
 ## Problem
 
@@ -145,19 +150,27 @@ inside the `Session` value as the anchor.**
 Key shape:
 
 ```
-${virtualFile.url}::${featureId}::${matchValueHash}#${occurrenceIndex}
+${virtualFile.url}::${featureId}::${valueHash}#${occurrenceIndex}
 ```
 
 - `virtualFile.url` survives editor lifecycle and is the same across splits
   and additional windows in the same project.
 - `featureId` keeps `http` and `shell` matches with the same payload
   separate.
-- `matchValueHash` — stable hash of `FeatureMatch.value` (the normalized
-  command/URL text), not of the surrounding line.
+- `valueHash` — stable hash of `FeatureMatch.value` (the normalized
+  command/URL text), not of the surrounding line. We keep this as a short
+  hex hash (`Integer.toHexString(value.hashCode())`) for compactness; the
+  paired `occurrenceIndex` and per-file scoping make accidental collisions
+  innocuous (two distinct values with the same hash in the same file with
+  the same `featureId`). See Risk #1 for the trade-off and the explicit
+  decision to *not* embed the raw value in the key.
 - `occurrenceIndex` — 0-based index of this match among matches in the same
   file with the same `(featureId, valueHash)`. Computed during
   `computeMatches` while we already iterate the file. Disambiguates
-  duplicates without depending on offsets.
+  duplicates without depending on offsets. Order is determined by
+  **global** ascending `originalRange.startOffset` across the whole file
+  (not per-PsiElement) so the index is deterministic regardless of which
+  `PsiElement` contains the match.
 
 Session value gains:
 
@@ -191,9 +204,13 @@ Why this combo:
 ## Implementation steps
 
 1. **Extend `Session`** with `virtualFileUrl`, `featureId`, `valueHash`,
-   `occurrenceIndex`, `anchor`. Make `container` nullable already (it is).
-   Add `fun isAlive(): Boolean` that returns
-   `anchor?.element?.isValid == true`.
+   `occurrenceIndex`, `anchor`. `container` is already nullable. Add
+   `fun isAlive(): Boolean` that resolves the anchor under a read action
+   (`SmartPsiElementPointer.element` requires read access) and returns
+   `element != null && element.isValid`. Make the new mutable fields
+   (`container`, `wrapper`, `state`, `processHandler`, `collapsed`,
+   `anchor`) `@Volatile` — `PsiTreeChangeListener` (EDT) and
+   `processTerminated` (worker thread) write concurrently; see Risk #4.
 
 2. **Rewrite `makeKey`** as a top-level helper on `(VirtualFile, FeatureMatch,
    Int)` — drop the `Editor` parameter entirely:
@@ -206,12 +223,14 @@ Why this combo:
        Integer.toHexString(value.hashCode())  // collision rate is fine for our scale
    ```
 
-3. **Compute `occurrenceIndex` in `computeMatches`.** While building
-   `matchesByElement`, also build a flat `List<FeatureMatch>` per file and
-   number each match by `(featureId, valueHash)` running counter. Attach the
-   index to a side map `Map<FeatureMatch, Int>` keyed by identity — or store
-   it directly on a wrapper. (Don't mutate `FeatureMatch` — it's a public
-   data class.)
+3. **Compute `occurrenceIndex` in `computeMatches`.** After building
+   `matchesByElement`, flatten everything into a single list sorted by
+   ascending `originalRange.startOffset`. Walk it and assign each entry a
+   running 0-based index keyed by `(featureId, valueHash)`. Store the
+   result in an `IdentityHashMap<FeatureMatch, Int>` (sharing class with
+   `matchesByElement` so `collect()` can look it up by reference).
+   `FeatureMatch` stays unmodified — it's a public data class shared with
+   future plans.
 
 4. **`buildActionsPresentation`** no longer reads `editor.document.getLineNumber`
    for key computation. Line is still needed for `lineEndOffset` (where to
@@ -247,13 +266,19 @@ Why this combo:
    `ConcurrentHashMap<String, MutableSet<String>>` (url → keys).
 
 7. **`FileEditorManagerListener` reaper** (new class
-   `base/SessionLifecycleListener.kt`, registered as project listener in
-   `plugin.xml`):
+   `base/lifecycle/SessionLifecycleListener.kt`, wired via
+   `<projectListeners>` in `plugin.xml`, topic
+   `FileEditorManagerListener.FILE_EDITOR_MANAGER`):
 
-   - `fileClosed(file)` — for each session with that url:
+   - `fileClosed(source, file)` — **first check** `source.getAllEditors(file)`.
+     If the file is still open in another tab/window of the same project,
+     do nothing (split close, not file close). Otherwise, for each session
+     with that url:
      - if `state == RUNNING` → call `processHandler?.destroyProcess()` and
        set `state = FINISHED`. **Do not remove the entry** — user may
        reopen and want to see the result.
+     - if `state == IDLE` → remove the entry; it never ran, nothing to
+       preserve.
      - dispose the `JPanel` (it's anchored to a dead `Editor`), null out
        `container`. Next reopen will rebuild it from the still-attached
        `wrapper`.
@@ -266,10 +291,14 @@ Why this combo:
    anchored to that specific editor (panels are 1-per-session today, so
    typically nothing to do).
 
-9. **PSI-deletion reaper.** Subscribe to `PsiTreeChangeListener` (project
-   level). On `childRemoved` / `childReplaced`, iterate sessions for the
-   affected `VirtualFile` and check `session.isAlive()`. For any dead
-   anchor:
+9. **PSI-deletion reaper.** New `SessionPsiChangeListener` extending
+   `PsiTreeChangeAdapter`, registered via
+   `PsiManager.getInstance(project).addPsiTreeChangeListener(listener,
+   sessionStorage)` so it disposes with the project service. On
+   `childRemoved` / `childReplaced`, derive the affected file (`event.file
+   ?: event.parent?.containingFile`), then iterate sessions for that
+   file's url and check `session.isAlive()` under a read action. For any
+   dead anchor:
    - terminate the process,
    - dispose the panel,
    - `sessionStorage.remove(key)`.
@@ -280,18 +309,62 @@ Why this combo:
    old key has no matching match anymore — sweep it via "session has no
    match in latest `computeMatches`" check (step 10), not via PSI delete.
 
-10. **Stale-key sweep at end of `computeMatches`.** Cheap optimization:
-    after building `matchesByElement`, compute the set of *valid* keys for
-    this file and call `sessionStorage.removeAllForFile(url) - validKeys`
-    to evict any session whose match disappeared (edited away, file
-    rewritten, etc.). Terminate processes during eviction.
+10. **Stale-key sweep at end of `computeMatches`.** Cheap defence in depth:
+    after computing all matches and `occurrenceIndex` values for the file,
+    build the set of *valid* keys for this file and call
+    `sessionStorage.sweepFile(url, validKeys)` which, for each session
+    keyed by `url` not present in `validKeys`, terminates the process and
+    disposes the panel before removing the entry. Runs on each inlay
+    pass; the per-file scan is cheap (one session per Run-click, not per
+    match). The sweep MUST be confined to keys for this single file's
+    `url` — never touch sessions belonging to other files.
 
-11. **`ProjectManagerListener.projectClosing`** — last-resort cleanup:
-    terminate every process owned by every session in the project before
-    disposal.
+11. **`SessionStorage.dispose()`** — `SessionStorage` is a
+    `@Service(PROJECT)` and therefore already disposed with the project.
+    Implement `Disposable` and in `dispose()` terminate every session's
+    process and drop the map. This is the last-resort cleanup; we don't
+    need a separate `ProjectManagerListener.projectClosing` because
+    project disposal disposes project services.
 
 12. **Delete `makeKey(editor, featureId, line)`** signature, update all
     call sites. Compile error will catch any miss.
+
+### Listener registration (plugin.xml)
+
+```xml
+<projectListeners>
+    <listener
+        class="com.github.xepozz.inline_call.base.lifecycle.SessionLifecycleListener"
+        topic="com.intellij.openapi.fileEditor.FileEditorManagerListener"/>
+</projectListeners>
+```
+
+`PsiTreeChangeListener` and `EditorFactoryListener` are wired
+programmatically inside `SessionStorage` (or a tiny "starter" service
+triggered on project open) because they need a `Disposable` parent
+parameter and benefit from sharing the `SessionStorage` instance. The
+`SessionStorage` service serves as the `Disposable` parent so that
+unregistration is automatic on project close.
+
+## Cross-plan dependencies
+
+- **Plan 03 (coroutines).** Plan 03 will convert `SessionStorage` into
+  `class SessionStorage(project, cs: CoroutineScope)` and add `Session.job:
+  Job?`. To minimise merge friction this plan deliberately leaves the
+  primary constructor untouched and adds *all* new mutable fields as `var`
+  so plan 03 can append `var job: Job? = null` without rewriting any field
+  in the data class. The `dispose()` we add here will, after plan 03,
+  cancel the `cs` as well; for now it just terminates processes.
+- **Plan 01 (declarative inlay hints).** Plan 01 owns the inlay UI
+  pipeline. This plan only changes `makeKey` and the listener wiring
+  inside `ExecutionInlayProvider`; the per-state UI builder code remains
+  identical bytes-wise.
+- **Plan 02 (run configurations).** No overlap. Run configurations don't
+  touch `SessionStorage`.
+- **Plan 04 (offset mapping).** This plan reads `FeatureMatch.value` (the
+  normalised payload) which is exactly what plan 04 strengthens. Once
+  plan 04 lands, `valueHash` becomes even more stable across
+  PHPDoc-comment-style reformatting; no API change needed here.
 
 ## Migration
 
