@@ -14,6 +14,15 @@
     <resource-bundle>messages.CallBundle</resource-bundle>
 
     <extensions defaultExtensionNs="com.intellij">
+        <configurationType
+                implementation="com.github.xepozz.inline_call.feature.http.run.HttpRunConfigurationType"/>
+        <configurationType
+                implementation="com.github.xepozz.inline_call.feature.shell.run.ShellRunConfigurationType"/>
+
+        <runConfigurationProducer
+                implementation="com.github.xepozz.inline_call.feature.http.run.HttpRunConfigurationProducer"/>
+        <runConfigurationProducer
+                implementation="com.github.xepozz.inline_call.feature.shell.run.ShellRunConfigurationProducer"/>
     </extensions>
 
     <extensionPoints>

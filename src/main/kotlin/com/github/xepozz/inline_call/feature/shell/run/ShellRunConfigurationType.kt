@@ -13,10 +13,13 @@ import org.jetbrains.annotations.Nls
 import javax.swing.Icon
 
 class ShellRunConfigurationType : ConfigurationType {
-    
+
     companion object {
+        // Persistence contract: this value is written into workspace.xml as
+        // `type="..."` and is part of the plugin's public surface once
+        // shipped. Do NOT rename without a migration shim.
         const val ID = "ShellInlayRunConfiguration"
-        
+
         fun getInstance(): ShellRunConfigurationType =
             ConfigurationTypeUtil.findConfigurationType(ShellRunConfigurationType::class.java)
     }
@@ -24,7 +27,7 @@ class ShellRunConfigurationType : ConfigurationType {
     override fun getId(): String = ID
     override fun getDisplayName(): String = "Shell Command"
     override fun getConfigurationTypeDescription(): @Nls(capitalization = Nls.Capitalization.Sentence) String? {
-        return "configuration type description"
+        return "Run shell command from comment"
     }
 
     override fun getIcon(): Icon = AllIcons.Actions.Execute
@@ -34,9 +37,15 @@ class ShellRunConfigurationType : ConfigurationType {
 }
 
 class ShellConfigurationFactory(type: ConfigurationType) : ConfigurationFactory(type) {
-    
-    override fun getId(): String = ShellRunConfigurationType.ID
-    
+
+    companion object {
+        // Persistence contract: written into workspace.xml as `factoryName="..."`.
+        // Must be unique within `ShellRunConfigurationType`. Do NOT rename.
+        const val FACTORY_ID = "Shell"
+    }
+
+    override fun getId(): String = FACTORY_ID
+
     override fun createTemplateConfiguration(project: Project): RunConfiguration =
         ShellRunConfiguration(project, this, "Shell")
 

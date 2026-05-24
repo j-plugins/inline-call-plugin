@@ -13,12 +13,13 @@ import com.intellij.execution.process.OSProcessHandler
 import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.process.ProcessTerminatedListener
 import com.intellij.execution.runners.ExecutionEnvironment
+import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.options.SettingsEditor
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.ui.TextFieldWithBrowseButton
+import com.intellij.openapi.ui.DialogPanel
+import com.intellij.ui.dsl.builder.bindText
 import com.intellij.ui.dsl.builder.panel
 import javax.swing.JComponent
-import javax.swing.JTextField
 
 class ShellRunConfiguration(
     project: Project,
@@ -53,7 +54,7 @@ class ShellRunState(
     override fun startProcess(): ProcessHandler {
         val commandLine = GeneralCommandLine("/bin/sh", "-c", configuration.command)
             .withRedirectErrorStream(true)
-        
+
         if (configuration.workingDirectory.isNotBlank()) {
             commandLine.withWorkDirectory(configuration.workingDirectory)
         } else {
@@ -66,27 +67,50 @@ class ShellRunState(
     }
 }
 
-class ShellSettingsEditor : SettingsEditor<ShellRunConfiguration>() {
-    
-    private val commandField = JTextField()
-    private val workingDirField = TextFieldWithBrowseButton()
+/**
+ * Mutable snapshot the Kotlin UI DSL binds against. Translated to/from
+ * [ShellRunConfiguration] in [ShellSettingsEditor.applyEditorTo] /
+ * [ShellSettingsEditor.resetEditorFrom].
+ */
+private data class ShellUiModel(
+    var command: String = "",
+    var workingDirectory: String = "",
+)
 
-    override fun createEditor(): JComponent = panel {
-        row("Command:") {
-            cell(commandField).resizableColumn()
+class ShellSettingsEditor : SettingsEditor<ShellRunConfiguration>() {
+
+    private val model = ShellUiModel()
+    private lateinit var panel: DialogPanel
+
+    override fun createEditor(): JComponent {
+        panel = panel {
+            row("Command:") {
+                textField()
+                    .resizableColumn()
+                    .bindText(model::command)
+            }
+            row("Working directory:") {
+                textFieldWithBrowseButton(
+                    fileChooserDescriptor = FileChooserDescriptorFactory.createSingleFolderDescriptor()
+                )
+                    .resizableColumn()
+                    .bindText(model::workingDirectory)
+            }
         }
-        row("Working directory:") {
-            cell(workingDirField).resizableColumn()
-        }
+        return panel
     }
 
     override fun applyEditorTo(s: ShellRunConfiguration) {
-        s.command = commandField.text
-        s.workingDirectory = workingDirField.text
+        panel.apply()
+        s.command = model.command
+        s.workingDirectory = model.workingDirectory
     }
 
     override fun resetEditorFrom(s: ShellRunConfiguration) {
-        commandField.text = s.command
-        workingDirField.text = s.workingDirectory
+        model.command = s.command
+        model.workingDirectory = s.workingDirectory
+        if (::panel.isInitialized) {
+            panel.reset()
+        }
     }
 }
