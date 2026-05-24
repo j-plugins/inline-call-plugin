@@ -81,22 +81,23 @@ class CStyleBlockNormalizer(private val stripStarPrefix: Boolean) : CommentNorma
                 lineEnd++
             }
 
-            // Strip the per-line decoration: leading whitespace + optional `* ` if requested.
-            var contentStart = lineStart
-            if (stripStarPrefix) {
-                while (contentStart < lineEnd && rawText[contentStart].isWhitespace()) {
-                    contentStart++
-                }
-                if (contentStart < lineEnd && rawText[contentStart] == '*') {
-                    contentStart++
-                    if (contentStart < lineEnd && rawText[contentStart] == ' ') {
-                        contentStart++
-                    }
-                }
+            // Decoration probe: where does non-decoration content start?
+            // Decoration is leading whitespace + optional `* ` regardless
+            // of [stripStarPrefix]; the flag only governs whether we
+            // *emit* that decoration when content exists on the line.
+            var decoEnd = lineStart
+            while (decoEnd < lineEnd && rawText[decoEnd].isWhitespace()) decoEnd++
+            if (decoEnd < lineEnd && rawText[decoEnd] == '*') {
+                decoEnd++
+                if (decoEnd < lineEnd && rawText[decoEnd] == ' ') decoEnd++
             }
+            val isDecorationOnly = decoEnd >= lineEnd
+
+            // Effective contentStart depends on stripping mode.
+            val contentStart = if (stripStarPrefix) decoEnd else lineStart
 
             val contentLength = lineEnd - contentStart
-            if (contentLength > 0) {
+            if (contentLength > 0 && !isDecorationOnly) {
                 builder.append(rawText, contentStart, lineEnd)
                 segments += SegmentedOffsetMapping.Segment(
                     normalizedStart = builder.length - contentLength,
@@ -148,14 +149,17 @@ class CStyleBlockNormalizer(private val stripStarPrefix: Boolean) : CommentNorma
     /**
      * After consuming a `\n` at offset `cursor - 1`, scans forward to
      * see whether at least one non-decoration character precedes
-     * `bodyEnd`. Decoration is leading whitespace plus optional `*` plus
-     * optional single space (when [stripStar] is true).
+     * `bodyEnd`. Decoration is always leading whitespace + optional `*` +
+     * optional single space — regardless of [stripStarPrefix]. The flag
+     * only controls whether we *emit* the decoration on real content
+     * lines; when it comes to deciding whether to emit the trailing
+     * newline, a decoration-only line is decoration in both modes.
      */
     private fun hasMoreContentBefore(
         rawText: String,
         cursor: Int,
         bodyEnd: Int,
-        stripStar: Boolean,
+        @Suppress("UNUSED_PARAMETER") stripStar: Boolean,
     ): Boolean {
         var i = cursor
         while (i < bodyEnd) {
@@ -165,12 +169,10 @@ class CStyleBlockNormalizer(private val stripStarPrefix: Boolean) : CommentNorma
                 lineEnd++
             }
             var contentStart = lineStart
-            if (stripStar) {
-                while (contentStart < lineEnd && rawText[contentStart].isWhitespace()) contentStart++
-                if (contentStart < lineEnd && rawText[contentStart] == '*') {
-                    contentStart++
-                    if (contentStart < lineEnd && rawText[contentStart] == ' ') contentStart++
-                }
+            while (contentStart < lineEnd && rawText[contentStart].isWhitespace()) contentStart++
+            if (contentStart < lineEnd && rawText[contentStart] == '*') {
+                contentStart++
+                if (contentStart < lineEnd && rawText[contentStart] == ' ') contentStart++
             }
             if (contentStart < lineEnd) return true
             i = lineEnd
