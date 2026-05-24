@@ -1,11 +1,28 @@
 # 04 — Real OffsetMapping for multi-line and decorated comments
 
-Status: draft.
+Status: refined after self-review.
 Scope: `base/api/OffsetMapping.kt`, `base/api/BaseLanguageTextExtractor.kt`,
 language extractors (`language/{php,xml,yaml}/*Extractor.kt`), feature
 adapters (`feature/{shell,http}/*Adapter.kt`).
 Out of scope: heredoc/nowdoc, string concatenation, template literals,
 XML CDATA, kotlin `""" ... """`.
+
+## PSI facts verified before implementation
+
+- `com.jetbrains.php.lang.documentation.phpdoc.psi.PhpDocComment`
+  extends `com.intellij.psi.PsiDocCommentBase`, which in turn extends
+  `com.intellij.psi.PsiComment`. So the existing
+  `PsiTreeUtil.findChildrenOfAnyType(file, PsiComment::class.java)` walk
+  in `BaseLanguageTextExtractor.extract()` already yields PHPDoc nodes —
+  no PSI traversal changes needed.
+- `com.jetbrains.php.lang.lexer.PhpTokenTypes` exposes both `LINE_COMMENT`
+  and `C_STYLE_COMMENT`. Per-element dispatch in PHPLanguageExtractor
+  branches on the PhpDocComment class first (it would otherwise also
+  match `C_STYLE_COMMENT` because the lexer wraps PHPDoc tokens too).
+- `element.text.findTextRange(text)?.shiftRight(element.textOffset)` in
+  the current base extractor is a tautological `TextRange(0, len)` lookup
+  followed by a shift, equivalent to `element.textRange`. Plan keeps the
+  existing call for diff-minimality; cleanup is out of scope.
 
 ## Problem
 
@@ -113,12 +130,26 @@ class SegmentedOffsetMapping(
 ### Length handling
 
 Today `endOriginal = startOriginal + m.value.length`. That stays correct
-while each match lies inside one segment. Phase 1 patterns use `(.+)` (no
-newline), and all decoration we strip is at line boundaries — so matches
-never cross gaps. Still, **migrate adapters to**
+while each match lies inside one segment **and** `m.value` equals the
+full match. Phase 1 patterns use `(.+)` (no newline), and all decoration
+we strip is at line boundaries — so matches never cross gaps. Still,
+**migrate adapters to**
 `endOriginal = base + mapping.toOriginal(m.offset + m.value.length)` so
 multi-line patterns are not a future trap. Add a debug assertion that
 `endOriginal - startOriginal >= m.value.length`.
+
+Caveat (latent, separate fix): `RegexpMatcher.findMatches` builds each
+`MatchResult` as `(matcher.start(), matcher.group(1).trim())`. For the
+shell pattern `shell:\s*(.+)`, `group(0)` is `shell: cmd` and `group(1)`
+is `cmd`, so `m.offset` points at `shell:` while `m.value.length` is
+only the trailing command length. End offset arithmetic
+`m.offset + m.value.length` therefore lands mid-match today regardless
+of this plan. Plan 04 does **not** fix this: it routes both ends through
+the mapping unchanged. A follow-up should align `m.offset` with
+`group(1)` or emit `valueRange` directly; the current adapters render an
+inlay only at `startOriginal`, so the wrong `endOriginal` is invisible
+in the UI but will bite anything that highlights the matched range
+(actions, intentions, navigation).
 
 ### Why not a function or parallel `IntArray`s?
 
@@ -214,7 +245,11 @@ Unit tests in `SegmentedOffsetMappingTest`:
 
 Files: `base/api/CommentNormalizer.kt`, `base/normalizers/{Identity,SingleLine,CStyleBlock,XmlComment}Normalizer.kt`.
 
-`SingleLineCommentNormalizer(markerRegex: String)`: strips `^\s*<marker>\s?`.
+`SingleLineCommentNormalizer(markerRegex: String)`: strips
+`^\s*(?:<marker>)\s?`. Note the non-capturing group around the marker —
+the original `^\s*<marker>\s?` form has wrong precedence under
+alternation (`//|#` would bind as `(^\s*//)|(#\s?)`). The normalizer
+wraps the caller's marker in `(?:...)` to keep call sites simple.
 `CStyleBlockNormalizer(stripStarPrefix: Boolean)`: handles `/* ... */`
 and PHPDoc as described.
 `XmlCommentNormalizer`: strips `<!--` / `-->` with one optional inner
@@ -313,6 +348,29 @@ Tests:
 
 No harness changes; `MyPluginTest` already drives the existing fixture
 folder. Add new fixtures next to it.
+
+CRLF fixtures: do not check `phpdoc_crlf.php` in with literal `\r\n` —
+local git autocrlf / `.gitattributes` configurations can rewrite it.
+Construct the CRLF buffer in test code (`text.replace("\n", "\r\n")` on
+a normal fixture) and feed it via `myFixture.configureByText`. Same
+treatment for any YAML CRLF case if added later.
+
+## Compatibility with sibling plans
+
+- **01 (declarative inlay hints)**: provider reads
+  `match.originalRange.startOffset`, calls
+  `editor.document.getLineNumber(start)`, and addresses inlays via
+  `addInlineElement(offset, ...)`. As long as `startOriginal` lands on a
+  real document offset, the new mapping is transparent. No file in
+  `base/inlay/` is touched.
+- **02 (run configurations)**: feature adapters' `execute()` body is
+  untouched; only `match()` end-offset arithmetic is rewritten. Run
+  configs that consume `match.value` see no change.
+- **03 (coroutines)**: no `invokeLater`/coroutine site is modified.
+- **05 (session storage key)**: key derivation uses
+  `editor.document.getLineNumber(start)`. The mapping makes `start`
+  *more* correct (no longer pointing at decoration), but on existing
+  passing fixtures the line number is identical — sessions stay sticky.
 
 ## Risks
 
