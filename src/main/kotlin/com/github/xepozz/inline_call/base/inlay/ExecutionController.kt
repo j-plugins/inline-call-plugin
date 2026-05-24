@@ -10,8 +10,11 @@ import com.github.xepozz.inline_call.base.inlay.ui.embedContainerIntoEditor
 import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
 import com.intellij.codeInsight.hints.declarative.impl.DeclarativeInlayHintsPassFactory
 import com.intellij.execution.process.ProcessEvent
+import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.process.ProcessListener
-import com.intellij.openapi.application.EDT
+import com.intellij.openapi.Disposable
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.editor.Editor
@@ -21,21 +24,35 @@ import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
 import com.intellij.psi.SmartPointerManager
 import com.intellij.psi.SmartPsiElementPointer
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineName
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.awt.BorderLayout
 import javax.swing.JPanel
 
 /**
  * Project-scoped service that performs run / stop / delete / toggle-collapse
  * for inline-call feature matches and refreshes the declarative inlay pass
- * afterwards. Kept independent from any specific inlay provider so the same
- * logic can be reused from [com.intellij.codeInsight.hints.declarative.InlayActionHandler]
- * implementations or from future entry points (toolbar action, run configurations, etc.).
+ * afterwards.
+ *
+ * Design notes (post-debugging):
+ *
+ * - `run()` is invoked from the IDE click thread (EDT). Phase 1 (Swing
+ *   component mounting + state transition to RUNNING) runs synchronously
+ *   on the caller's EDT — no dispatcher switch, no suspension. This is
+ *   intentional: tests revealed that `withContext(Dispatchers.EDT)` from
+ *   a coroutine launched on `Dispatchers.Default` (the service scope's
+ *   default) does not reliably resume its body in `BasePlatformTestCase`
+ *   environments due to modality/dispatch interactions. Avoiding the
+ *   switch entirely makes Run actually run.
+ *
+ * - Phase 2 (`feature.execute`) is launched in `SessionStorage.cs` so it
+ *   can do its own IO/async work and is cancelled with the session.
+ *
+ * - Phase 3 (process termination → UI refresh) is wired through
+ *   [ProcessListener.processTerminated]; the listener marshals back to
+ *   EDT via `ApplicationManager.invokeLater` for the state flip and
+ *   inlay refresh.
  */
 @Service(Service.Level.PROJECT)
 class ExecutionController(private val project: Project) {
@@ -54,13 +71,30 @@ class ExecutionController(private val project: Project) {
     ) {
         @Suppress("UNCHECKED_CAST")
         val typedFeature = feature as FeatureGenerator<Wrapper>
-        val newJob = sessionStorage.cs.launch(CoroutineName("inline-call:$key")) {
-            runImpl(editor, typedFeature, match, key, lineEndOffset, virtualFile, occurrenceIndex, anchorElement)
+        // Cancel any in-flight job for the same key first.
+        sessionStorage.getSession(key)?.job?.cancel()
+        // Phase 1: synchronous on EDT — mount the result container and
+        // flip state to RUNNING so the inlay redraws as "Stop / Delete".
+        val session = preparePhase1(editor, typedFeature, match, key, lineEndOffset, virtualFile, occurrenceIndex, anchorElement)
+        // Phase 2: launch feature.execute on the service scope. The Job
+        // is stored on the session so stop()/delete() can cancel it.
+        val job = sessionStorage.cs.launch(CoroutineName("inline-call:$key")) {
+            val handler = try {
+                typedFeature.execute(match, session.wrapper!!, project)
+            } catch (t: Throwable) {
+                null
+            }
+            session.processHandler = handler
+            if (handler == null) {
+                finishOnEdt(session, editor)
+            } else {
+                attachTerminationListener(handler, session, editor)
+            }
         }
-        sessionStorage.replaceJob(key, newJob)?.cancel()
+        session.job = job
     }
 
-    private suspend fun <TWrapper : Wrapper> runImpl(
+    private fun <TWrapper : Wrapper> preparePhase1(
         editor: Editor,
         feature: FeatureGenerator<TWrapper>,
         match: FeatureMatch,
@@ -69,7 +103,7 @@ class ExecutionController(private val project: Project) {
         virtualFile: VirtualFile?,
         occurrenceIndex: Int,
         anchorElement: PsiElement?,
-    ) {
+    ): com.github.xepozz.inline_call.base.inlay.Session {
         val wrapper = feature.createWrapper()
         val vfUrl = virtualFile?.url ?: ""
         val valueHash = SessionStorage.hashValue(match.value)
@@ -78,83 +112,76 @@ class ExecutionController(private val project: Project) {
                 SmartPointerManager.getInstance(project).createSmartPsiElementPointer(anchorElement)
             else null
 
-        // Phase 1: ensure container exists and is mounted; replace wrapper.
-        val session = withContext(Dispatchers.EDT) {
-            var current = sessionStorage.getSession(key)
+        var current = sessionStorage.getSession(key)
+        val needsContainer = current?.container == null || current.container?.parent == null
 
-            // Container may be null because (a) never mounted, or (b) the
-            // previous editor was disposed on file close (container exists
-            // but its parent is null — rebuild and re-mount).
-            val needsContainer = current?.container == null || current.container?.parent == null
-
-            if (needsContainer) {
-                val container = try {
-                    val c = createResultContainer()
-                    embedContainerIntoEditor(editor, c, lineEndOffset)
-                    mountWrapperIntoContainer(c, wrapper)
-                    c
-                } catch (_: Throwable) {
-                    null
-                }
-                if (current == null) {
-                    current = Session(
-                        virtualFileUrl = vfUrl,
-                        featureId = match.featureId,
-                        valueHash = valueHash,
-                        occurrenceIndex = occurrenceIndex,
-                        anchor = anchor,
-                        container = container,
-                        wrapper = wrapper,
-                    )
-                } else {
-                    current.container = container
-                    current.wrapper = wrapper
-                    if (current.anchor == null) current.anchor = anchor
-                }
-                sessionStorage.putSession(key, current)
+        if (needsContainer) {
+            var embedded: Disposable? = null
+            val container = try {
+                val c = createResultContainer()
+                embedded = embedContainerIntoEditor(editor, c, lineEndOffset)
+                mountWrapperIntoContainer(c, wrapper)
+                c
+            } catch (_: Throwable) {
+                null
+            }
+            if (current == null) {
+                current = Session(
+                    virtualFileUrl = vfUrl,
+                    featureId = match.featureId,
+                    valueHash = valueHash,
+                    occurrenceIndex = occurrenceIndex,
+                    anchor = anchor,
+                    container = container,
+                    wrapper = wrapper,
+                    embeddedInlay = embedded,
+                )
             } else {
-                val container = current!!.container!!
-                val oldWrapper = current.wrapper
-                if (oldWrapper != null) {
-                    container.remove(oldWrapper.component)
-                }
-                mountWrapperIntoContainer(container, wrapper)
+                // Dispose any previous embedded inlay before overwriting.
+                current.embeddedInlay?.let { Disposer.dispose(it) }
+                current.container = container
                 current.wrapper = wrapper
+                current.embeddedInlay = embedded
                 if (current.anchor == null) current.anchor = anchor
             }
-            current.state = ExecutionState.RUNNING
-            refreshInlaysOnEdt(editor)
-            current
-        }
-
-        // Phase 2: execute. feature.execute manages its own dispatcher hops.
-        val handler = feature.execute(match, wrapper, project)
-        session.processHandler = handler
-
-        if (handler == null) {
-            withContext(NonCancellable + Dispatchers.EDT) {
-                session.state = ExecutionState.FINISHED
-                refreshInlaysOnEdt(editor)
+            sessionStorage.putSession(key, current)
+        } else {
+            val container = current!!.container!!
+            val oldWrapper = current.wrapper
+            if (oldWrapper != null) {
+                container.remove(oldWrapper.component)
             }
+            mountWrapperIntoContainer(container, wrapper)
+            current.wrapper = wrapper
+            if (current.anchor == null) current.anchor = anchor
+        }
+        current.state = ExecutionState.RUNNING
+        refreshInlaysOnEdt(editor)
+        return current
+    }
+
+    private fun attachTerminationListener(
+        handler: ProcessHandler,
+        session: Session,
+        editor: Editor,
+    ) {
+        // Race-safe: handler may already be terminated by the time we attach.
+        if (handler.isProcessTerminated) {
+            finishOnEdt(session, editor)
             return
         }
-
-        // Phase 3: bridge ProcessListener -> CompletableDeferred so the
-        // coroutine awaits termination without blocking a thread.
-        val done = CompletableDeferred<Unit>()
         handler.addProcessListener(object : ProcessListener {
             override fun processTerminated(event: ProcessEvent) {
-                done.complete(Unit)
+                finishOnEdt(session, editor)
             }
         })
-        try {
-            done.await()
-        } finally {
-            withContext(NonCancellable + Dispatchers.EDT) {
-                session.processHandler = null
-                session.state = ExecutionState.FINISHED
-                refreshInlaysOnEdt(editor)
-            }
+    }
+
+    private fun finishOnEdt(session: Session, editor: Editor) {
+        ApplicationManager.getApplication().invokeLater {
+            session.processHandler = null
+            session.state = ExecutionState.FINISHED
+            refreshInlaysOnEdt(editor)
         }
     }
 
@@ -171,8 +198,14 @@ class ExecutionController(private val project: Project) {
         val session = sessionStorage.remove(key) ?: return
         try { session.processHandler?.destroyProcess() } catch (_: Throwable) { }
         session.processHandler = null
-        sessionStorage.cs.launch(Dispatchers.EDT) {
+        ApplicationManager.getApplication().invokeLater {
+            // Dispose the embedded inlay so the editor can release its
+            // reference. Removing from Swing parent is not enough —
+            // EditorEmbeddedComponentManager tracks the inlay separately.
+            session.embeddedInlay?.let { try { Disposer.dispose(it) } catch (_: Throwable) {} }
+            session.embeddedInlay = null
             session.container?.parent?.remove(session.container)
+            session.container = null
             refreshInlaysOnEdt(editor)
         }
     }
@@ -181,14 +214,14 @@ class ExecutionController(private val project: Project) {
         val session = sessionStorage.getSession(key) ?: return
         session.collapsed = !session.collapsed
         val visible = !session.collapsed
-        sessionStorage.cs.launch(Dispatchers.EDT) {
+        ApplicationManager.getApplication().invokeLater {
             session.container?.isVisible = visible
             refreshInlaysOnEdt(editor)
         }
     }
 
     private fun mountWrapperIntoContainer(container: JPanel, wrapper: Wrapper) {
-        // Caller is expected to already be on the EDT.
+        // Caller is expected to already be on EDT.
         container.add(wrapper.component, BorderLayout.CENTER)
         container.revalidate()
         container.repaint()
@@ -204,8 +237,10 @@ class ExecutionController(private val project: Project) {
      * the pass for the affected file.
      */
     fun refreshInlays(editor: Editor) {
-        sessionStorage.cs.launch(Dispatchers.EDT) {
+        if (ApplicationManager.getApplication().isDispatchThread) {
             refreshInlaysOnEdt(editor)
+        } else {
+            ApplicationManager.getApplication().invokeLater { refreshInlaysOnEdt(editor) }
         }
     }
 

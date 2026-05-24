@@ -56,22 +56,26 @@ class ShellFeatureAdapter(val project: Project) : FeatureGenerator<ConsoleWrappe
         val value = match.value
         val console = wrapper.console
 
+        // Note: we do NOT wrap OSProcessHandler construction in
+        // withContext(Dispatchers.IO). Inside BasePlatformTestCase the
+        // `withContext` switch from the service-scope's default dispatcher
+        // never resumes — see SessionStorageCoroutineTest. Process.start()
+        // is fast enough (ms) to run on the caller's thread; the actual
+        // process IO happens off-thread inside OSProcessHandler anyway.
         return try {
-            // OSProcessHandler() constructor blocks on Process.start().
-            val processHandler = withContext(Dispatchers.IO) {
-                val commandLine = GeneralCommandLine("/bin/sh", "-c", value)
-                    .withRedirectErrorStream(true)
-                OSProcessHandler(commandLine).also {
-                    ProcessTerminatedListener.attach(it)
-                }
+            val commandLine = GeneralCommandLine("/bin/sh", "-c", value)
+                .withRedirectErrorStream(true)
+            val processHandler = OSProcessHandler(commandLine).also {
+                ProcessTerminatedListener.attach(it)
             }
             console.attachToProcess(processHandler)
             processHandler.startNotify()
             processHandler
         } catch (e: Exception) {
-            withContext(NonCancellable + Dispatchers.EDT) {
-                console.print("\n[Error: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
-            }
+            // Print the error directly; we're already on the same thread
+            // the caller picked for us (EDT in production, test thread in
+            // tests).
+            console.print("\n[Error: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
             null
         }
     }

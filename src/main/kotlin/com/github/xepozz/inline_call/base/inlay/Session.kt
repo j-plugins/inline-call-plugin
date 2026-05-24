@@ -3,6 +3,7 @@ package com.github.xepozz.inline_call.base.inlay
 import com.github.xepozz.inline_call.base.api.Wrapper
 import com.github.xepozz.inline_call.base.handlers.ExecutionState
 import com.intellij.execution.process.ProcessHandler
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ReadAction
 import com.intellij.psi.PsiElement
 import com.intellij.psi.SmartPsiElementPointer
@@ -32,6 +33,7 @@ class Session(
     @Volatile var processHandler: ProcessHandler? = null,
     @Volatile var collapsed: Boolean = false,
     @Volatile var job: Job? = null,
+    @Volatile var embeddedInlay: Disposable? = null,
 ) {
     /**
      * Whether the source anchor (typically a `PsiComment`) still exists and
