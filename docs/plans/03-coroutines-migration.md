@@ -42,22 +42,33 @@ migration is available unconditionally.
 
 ## All call sites
 
-Verified with `grep -rn "invokeLater" src --include='*.kt'`:
+Verified with `grep -rn "invokeLater" src --include='*.kt'`. The table separates
+**imports** (4) from **real call sites** (8 lambdas, 9 if we count
+`refreshInlays` which contains two consecutive UI calls inside the same
+`invokeLater` block). Imports are removed as a side effect of replacing every
+call inside the file.
 
-| # | File | Line | Context |
-|---|------|------|---------|
-| 1 | `src/main/kotlin/com/github/xepozz/inline_call/base/inlay/ExecutionInlayProvider.kt` | 26  | `import com.intellij.openapi.application.invokeLater` |
-| 2 | `src/main/kotlin/com/github/xepozz/inline_call/base/inlay/ExecutionInlayProvider.kt` | 237 | `mountWrapperIntoContainer` — add wrapper to result panel, revalidate, repaint |
-| 3 | `src/main/kotlin/com/github/xepozz/inline_call/base/inlay/ExecutionInlayProvider.kt` | 255 | `delete()` — remove container from parent after session is dropped |
-| 4 | `src/main/kotlin/com/github/xepozz/inline_call/base/inlay/ExecutionInlayProvider.kt` | 263 | `toggleCollapse()` — flip `container.isVisible` |
-| 5 | `src/main/kotlin/com/github/xepozz/inline_call/base/inlay/ExecutionInlayProvider.kt` | 267–269 | `refreshInlays()` — `InlayHintsPassFactoryInternal.forceHintsUpdateOnNextPass()` + `DaemonCodeAnalyzer.restart()` |
-| 6 | `src/main/kotlin/com/github/xepozz/inline_call/base/inlay/ui/embedContainerIntoEditor.kt` | 20 | Add component to `EditorEmbeddedComponentManager` |
-| 7 | `src/main/kotlin/com/github/xepozz/inline_call/feature/http/HttpFeatureAdapter.kt` | 11  | `import` |
-| 8 | `src/main/kotlin/com/github/xepozz/inline_call/feature/http/HttpFeatureAdapter.kt` | 109 | Print error from `whenComplete` |
-| 9 | `src/main/kotlin/com/github/xepozz/inline_call/feature/http/HttpFeatureAdapter.kt` | 114 | Print response from `whenComplete` |
-| 10 | `src/main/kotlin/com/github/xepozz/inline_call/feature/shell/ShellFeatureAdapter.kt` | 13  | `import` |
-| 11 | `src/main/kotlin/com/github/xepozz/inline_call/feature/shell/ShellFeatureAdapter.kt` | 63  | `catch (e: Exception)` — print failure to start process |
-| 12 | `src/main/kotlin/com/github/xepozz/inline_call/feature/http/run/HttpRunState.kt` | 158 | `printToConsole` — every console line goes through `invokeLater` |
+| # | File | Line | Kind | Context |
+|---|------|------|------|---------|
+| 1 | `src/main/kotlin/com/github/xepozz/inline_call/base/inlay/ExecutionInlayProvider.kt` | 26  | import | `com.intellij.openapi.application.invokeLater` |
+| 2 | `src/main/kotlin/com/github/xepozz/inline_call/base/inlay/ExecutionInlayProvider.kt` | 237 | call   | `mountWrapperIntoContainer` — add wrapper to result panel, revalidate, repaint |
+| 3 | `src/main/kotlin/com/github/xepozz/inline_call/base/inlay/ExecutionInlayProvider.kt` | 255 | call   | `delete()` — remove container from parent after session is dropped |
+| 4 | `src/main/kotlin/com/github/xepozz/inline_call/base/inlay/ExecutionInlayProvider.kt` | 263 | call   | `toggleCollapse()` — flip `container.isVisible` |
+| 5 | `src/main/kotlin/com/github/xepozz/inline_call/base/inlay/ExecutionInlayProvider.kt` | 267–269 | call (+ early-return reference on 269) | `refreshInlays()` — `InlayHintsPassFactoryInternal.forceHintsUpdateOnNextPass()` + `DaemonCodeAnalyzer.restart()` |
+| 6 | `src/main/kotlin/com/github/xepozz/inline_call/base/inlay/ui/embedContainerIntoEditor.kt` | 3   | import | — |
+| 7 | `src/main/kotlin/com/github/xepozz/inline_call/base/inlay/ui/embedContainerIntoEditor.kt` | 20  | call   | Add component to `EditorEmbeddedComponentManager` |
+| 8 | `src/main/kotlin/com/github/xepozz/inline_call/feature/http/HttpFeatureAdapter.kt` | 11  | import | — |
+| 9 | `src/main/kotlin/com/github/xepozz/inline_call/feature/http/HttpFeatureAdapter.kt` | 109 | call   | Print error from `whenComplete` |
+| 10 | `src/main/kotlin/com/github/xepozz/inline_call/feature/http/HttpFeatureAdapter.kt` | 114 | call   | Print response from `whenComplete` |
+| 11 | `src/main/kotlin/com/github/xepozz/inline_call/feature/shell/ShellFeatureAdapter.kt` | 13  | import | — |
+| 12 | `src/main/kotlin/com/github/xepozz/inline_call/feature/shell/ShellFeatureAdapter.kt` | 63  | call   | `catch (e: Exception)` — print failure to start process |
+| 13 | `src/main/kotlin/com/github/xepozz/inline_call/feature/http/run/HttpRunState.kt` | 158 | call (fully-qualified) | `printToConsole` — every console line goes through `invokeLater` |
+
+Summary: **4 imports + 8 real call lambdas + 1 in-lambda early-return reference**
+across 5 files. The often-quoted "12 sites" figure mixes imports and lambdas;
+when the task ticket says "12 call sites" it is shorthand for "all 12 matches
+returned by `grep -n invokeLater`" (the table above is exhaustive against that
+grep).
 
 Related (not `invokeLater`, but coupled to the migration):
 
@@ -111,8 +122,14 @@ withContext(Dispatchers.IO) {
 }
 ```
 
-`Dispatchers.IO` is the IntelliJ-flavored one (`com.intellij.openapi.application.IO`),
-not the kotlinx one. It is unbounded and designed for blocking calls.
+`Dispatchers.IO` is the IntelliJ-flavored one — it is exposed as an extension
+property `val Dispatchers.IO` on `kotlinx.coroutines.Dispatchers` from the
+`intellij.platform.coroutines` module. (In code: just write `Dispatchers.IO`
+without an explicit `import`; the kotlinx import resolves the receiver, the
+platform module supplies the property.) It is unbounded and designed for
+blocking calls. The fallback `kotlinx.coroutines.Dispatchers.IO` is bounded
+(default `64`) and unsuitable for many concurrent blocking calls — but for our
+use (at most a handful of HTTP requests) either is acceptable.
 
 ### Long-running per-execution scope
 
@@ -166,21 +183,35 @@ pass at every step.
 
 - Convert `SessionStorage` from `class SessionStorage(val project: Project)` to
   `class SessionStorage(val project: Project, val cs: CoroutineScope)`. The platform
-  injects the scope when the constructor declares one (since 2024.1).
-- Add a `Session.job: Job?` field so we can cancel an in-flight run.
-- Expose helpers: `fun cancelAll()` (called from `dispose`) and
-  `fun replaceJob(key, Job): Job?` returning the previously stored job.
-- No behaviour change for callers yet.
+  injects the scope when the constructor declares one (since 2024.1; we target 2025.1).
+- Add a `Session.job: Job?` field (mutable, defaults to `null`) so we can cancel
+  an in-flight run.
+- Expose helper: `fun replaceJob(key: String, job: Job): Job?` returning the
+  previously stored job (caller cancels it before launching a new one).
+- `remove(key)` should also cancel `Session.job` if present (the existing
+  `try { destroyProcess() }` lives in `ExecutionInlayProvider.delete` — it
+  stays there; this step only adds the field and helper).
+- **Scope is owned by the service**; we do *not* override `dispose()` to call
+  `cancelAll()` — the platform cancels the injected scope automatically when
+  the project is disposed (see *Service scope* section below).
+- No behaviour change for callers yet (no coroutines launched). Compiles.
 
-### Step 2 — Introduce a suspending UI helper module
+> Cross-plan note: `SessionStorage` is also touched by plan 05 (key derivation,
+> `SmartPsiElementPointer`-based anchor, file/editor-listener reaper). This
+> plan deliberately limits itself to adding `cs: CoroutineScope` and
+> `Session.job: Job?`. Keep the existing `getSession` / `putSession` /
+> `remove` signatures unchanged so plan 05 can rebase cleanly.
 
-- Add `ui/Edt.kt` with:
-  - `suspend fun onEdt(block: () -> Unit) = withContext(Dispatchers.EDT) { block() }`
-    (thin wrapper that captures the right modality).
-  - `suspend fun embedContainerIntoEditor(editor: Editor, container: JPanel, offset: Int)` —
-    convert `embedContainerIntoEditor.kt` from `invokeLater` to a suspending function
-    on `Dispatchers.EDT`.
+### Step 2 — Make `embedContainerIntoEditor` suspending
+
+- Convert `embedContainerIntoEditor.kt` from `invokeLater { addComponent(...) }`
+  to a `suspend fun` body that performs `withContext(Dispatchers.EDT) { ... }`.
 - Remove the `invokeLater` import from `embedContainerIntoEditor.kt`.
+- Guard against editor disposal inside the EDT block:
+  `if ((editor as? EditorEx)?.isDisposed != false) return@withContext`.
+- A dedicated `ui/Edt.kt` helper module is **not** introduced — each call site
+  already calls `withContext(Dispatchers.EDT) { ... }` directly, and an extra
+  wrapper would only add a layer of indirection without saving any tokens.
 
 ### Step 3 — Make `FeatureGenerator.execute` suspending
 
@@ -194,63 +225,195 @@ pass at every step.
   ): ProcessHandler?
   ```
 
-  The `onProcessCreated` callback disappears — the caller receives the handler from
-  the return value (or `null` when the feature has no process semantics).
+  The `onProcessCreated` callback disappears — the caller receives the handler
+  from the return value (or `null` when the feature has no process semantics or
+  failed to start).
 - Update both adapters:
   - `ShellFeatureAdapter`: wrap `OSProcessHandler(commandLine)` creation in
-    `withContext(Dispatchers.IO)` (constructor blocks on `Process.start()`). Inside
-    the `catch (e: Exception)` block, switch to `Dispatchers.EDT` to print the error.
-  - `HttpFeatureAdapter`: replace `sendAsync(...).whenComplete { ... }` with
+    `withContext(Dispatchers.IO)` (constructor blocks on `Process.start()`).
+    On exception, switch to `Dispatchers.EDT` to print the error and return
+    `null`. Otherwise return the handler after `startNotify()`.
+  - `HttpFeatureAdapter`: rewrite to:
 
     ```kotlin
-    val response = runInterruptible(Dispatchers.IO) {
-        httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+    override suspend fun execute(...): ProcessHandler? {
+        // EDT: initial console.print calls happen on EDT.
+        val handler = HttpExecAdapterHandler() // ProcessHandler subclass
+        handler.startNotify()
+        try {
+            val response = runInterruptible(Dispatchers.IO) {
+                httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+            }
+            withContext(NonCancellable + Dispatchers.EDT) {
+                console.clear()
+                printResponse(console, response)
+            }
+            handler.complete(0)
+        } catch (ce: CancellationException) {
+            // Do not print "cancelled" — the caller controls UI feedback.
+            handler.complete(143)
+            throw ce
+        } catch (t: Throwable) {
+            withContext(NonCancellable + Dispatchers.EDT) {
+                console.print("[Error: ${t.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
+            }
+            handler.complete(-1)
+        }
+        return handler
     }
-    withContext(Dispatchers.EDT) { console.clear(); printResponse(console, response) }
     ```
 
-    The custom `ProcessHandler` becomes much smaller — `destroyProcessImpl` only
-    needs to call `notifyProcessTerminated(0)`; the coroutine is cancelled by the
-    caller via `Session.job?.cancel()`.
+    The custom `ProcessHandler` becomes much smaller — `destroyProcessImpl`
+    only calls `notifyProcessTerminated(143)`; the coroutine is cancelled by
+    the caller via `Session.job?.cancel()`. `CompletableFuture` and
+    `AtomicBoolean` disappear entirely.
+- **Return value semantics.** When `ShellFeatureAdapter` fails to spawn, it
+  returns `null` (after printing the error). The caller treats `null` the same
+  way as a successful `ProcessHandler` that has already terminated — set state
+  to `FINISHED`, do not attach a listener.
+- **Caller change** (in `ExecutionInlayProvider.run` — see step 4): replace the
+  old callback-based `feature.execute(match, wrapper, project) { handler -> ... }`
+  with `val handler = feature.execute(match, wrapper, project)` plus
+  `handler?.addProcessListener(...)`.
 
 ### Step 4 — Rewrite `ExecutionInlayProvider.run/stop/delete/toggle/refresh` on coroutines
 
-- Replace each `invokeLater { ... }` body with `sessionStorage.cs.launch { withContext(Dispatchers.EDT) { ... } }`.
+- Replace each `invokeLater { ... }` body with a launch on `sessionStorage.cs`
+  that switches to `Dispatchers.EDT` (UI mutations require it). Click handlers
+  are entered on the EDT already, but the resulting coroutine outlives the
+  click and must therefore declare its dispatcher explicitly.
 - The `run()` private function becomes:
 
   ```kotlin
-  private fun run(...) {
-      val previous = sessionStorage.replaceJob(key, sessionStorage.cs.launch { runImpl(...) })
-      previous?.cancel()
+  private fun <TWrapper : Wrapper> run(...) {
+      val newJob = sessionStorage.cs.launch(CoroutineName("inline-call:$key")) {
+          runImpl(...)
+      }
+      val prev = sessionStorage.putSession(key, currentSession.also { it.job = newJob })
+      // sessionStorage.replaceJob(key, newJob) returns the previous Job
+      // before overwriting; the caller cancels it.
+      prev?.cancel()
   }
-  private suspend fun runImpl(...) { /* uses withContext */ }
+
+  private suspend fun runImpl(...) {
+      withContext(Dispatchers.EDT) {
+          // wrapper / container / mount
+          session.state = ExecutionState.RUNNING
+          refreshInlaysOnEdt(editor)
+      }
+      val handler = feature.execute(match, wrapper, project)
+      session.processHandler = handler
+      if (handler == null) {
+          withContext(NonCancellable + Dispatchers.EDT) {
+              session.state = ExecutionState.FINISHED
+              refreshInlaysOnEdt(editor)
+          }
+          return
+      }
+      // Bridge ProcessListener -> CompletableDeferred so we can `await()`.
+      val done = CompletableDeferred<Unit>()
+      handler.addProcessListener(object : ProcessListener {
+          override fun processTerminated(event: ProcessEvent) { done.complete(Unit) }
+      })
+      try {
+          done.await()
+      } finally {
+          withContext(NonCancellable + Dispatchers.EDT) {
+              session.processHandler = null
+              session.state = ExecutionState.FINISHED
+              refreshInlaysOnEdt(editor)
+          }
+      }
+  }
   ```
 
-- `mountWrapperIntoContainer` → suspending function on `Dispatchers.EDT`, no longer
-  schedules onto the next UI tick.
-- `delete(key)` should `session.job?.cancelAndJoin()` from a coroutine before removing
-  the container; the `try { destroyProcess() } catch (_: Throwable) {}` becomes
-  obsolete because cancellation handles cleanup.
-- `refreshInlays(editor)` becomes `suspend` and is called from inside the launched
-  coroutine on `Dispatchers.EDT`.
+  Notes:
+  - `replaceJob` is the cleaner helper exposed in step 1 (`sessionStorage.replaceJob(key, newJob)?.cancel()`).
+  - `refreshInlaysOnEdt` is a private non-suspending function: it expects to
+    already be on the EDT (we always are when invoked).
+- `mountWrapperIntoContainer` → small helper that runs inline on the EDT
+  (already inside `withContext(Dispatchers.EDT)`). No more "schedules onto
+  next UI tick" behaviour.
+- `delete(key)` becomes:
+
+  ```kotlin
+  private fun delete(key: String) {
+      val session = sessionStorage.remove(key) ?: return
+      // Cancel the run if any. ProcessHandler.destroyProcess() is still
+      // useful for OSProcessHandler — the coroutine's finally block will
+      // see processTerminated → done.complete → coroutine exits.
+      try { session.processHandler?.destroyProcess() } catch (_: Throwable) {}
+      session.job?.cancel()
+      sessionStorage.cs.launch(Dispatchers.EDT) {
+          session.container?.parent?.remove(session.container)
+      }
+  }
+  ```
+
+  We do **not** `cancelAndJoin()` from `delete` — it is called from a click
+  handler on the EDT; blocking the EDT to wait for an HTTP call is exactly
+  what we're trying to avoid.
+- `toggleCollapse(session)` becomes:
+
+  ```kotlin
+  private fun toggleCollapse(session: Session) {
+      session.collapsed = !session.collapsed
+      val visible = !session.collapsed
+      sessionStorage.cs.launch(Dispatchers.EDT) { session.container?.isVisible = visible }
+  }
+  ```
+
+  (Already on EDT? Yes, but we keep the launch so we can hop back through the
+  coroutine context — and because the click handler may dispatch us inside a
+  modal popup where direct mutation needs the right modality state.)
+- `refreshInlays(editor)` becomes:
+
+  ```kotlin
+  private fun refreshInlays(editor: Editor) {
+      val project = editor.project ?: return
+      sessionStorage.cs.launch(Dispatchers.EDT) {
+          @Suppress("UnstableApiUsage")
+          InlayHintsPassFactoryInternal.forceHintsUpdateOnNextPass()
+          DaemonCodeAnalyzer.getInstance(project).restart()
+      }
+  }
+  ```
+
+  > Cross-plan note: `InlayHintsPassFactoryInternal` is removed by plan 01
+  > (Phase 1 swaps it for `DaemonCodeAnalyzer.getInstance(project).restart(file)`).
+  > Plan 03 must **not** remove the call — only move it onto a coroutine
+  > dispatcher. Plan 01 lands the public-API switch independently.
+- `processTerminated` listener inside `runImpl` runs on a process worker
+  thread; it only completes a `CompletableDeferred` and lets the suspending
+  coroutine resume — no UI work is done from the worker thread, so no
+  threading violation.
 
 ### Step 5 — Convert `HttpRunState`/`HttpProcessHandler`
 
-- `HttpRunState` is a one-shot `RunProfileState` returning an `ExecutionResult`. It
-  cannot be a suspend function (called from the platform). Inside `startNotify()`,
-  replace `thread { executeRequest() }` with a launch on a scope bound to the
-  execution lifecycle. Two options:
-  - **Preferred:** create a `RunContentDescriptor`-scoped scope by passing the
-    project's `SessionStorage.cs` and storing the `Job` on the handler so
-    `destroyProcessImpl` cancels it.
-  - **Fallback:** the platform also exposes
-    `service<MyCoroutineService>().cs` per project; route through `SessionStorage.cs`
-    for consistency.
-- Replace `httpClient.send(...)` with `runInterruptible(Dispatchers.IO) { ... }` so
-  cancellation interrupts the blocking call.
-- `printToConsole` no longer needs `invokeLater`; the surrounding coroutine already
-  runs on `Dispatchers.EDT` between IO steps (or, for high-volume body output, do
-  a single `withContext(Dispatchers.EDT) { ... }` after assembling the text).
+- `HttpRunState` is a one-shot `RunProfileState` returning an `ExecutionResult`.
+  It cannot be a `suspend fun` (called from the platform). Inside
+  `HttpProcessHandler.startNotify()`, replace
+  `thread { executeRequest() }` with a launch on the project-scoped
+  `SessionStorage.getInstance(environment.project).cs` and store the
+  resulting `Job` on the handler so `destroyProcessImpl` cancels it.
+- Wire-up: `HttpRunState.execute` constructs `HttpProcessHandler` with the
+  project (it has `environment.project`). The handler resolves
+  `SessionStorage` from that project lazily on `startNotify()`.
+- Replace `httpClient.send(...)` with `runInterruptible(Dispatchers.IO) { ... }`
+  so cancellation interrupts the blocking call (JDK 21 — `send` throws
+  `InterruptedException`/`IOException` on interrupt).
+- `printToConsole` no longer needs `invokeLater`. The surrounding coroutine is
+  on `Dispatchers.IO` while sending the request, and switches to
+  `Dispatchers.EDT` to print results. For headers + body output we do a
+  single `withContext(Dispatchers.EDT) { ... }` after the response is received
+  — printing line-by-line on the EDT does not change observable behaviour but
+  one bracket cuts log noise.
+- `destroyProcessImpl` cancels the stored `Job` and calls
+  `notifyProcessTerminated(143)` once. `detachProcessImpl` does the same with
+  exit code `0`. The `finally` block in the coroutine still calls
+  `notifyProcessTerminated(0)` on natural completion; both paths must guard
+  with `AtomicBoolean` (existing pattern) so `notifyProcessTerminated` is
+  invoked exactly once.
 
 ### Step 6 — `computeMatches` off the EDT
 
@@ -272,15 +435,19 @@ pass at every step.
 ### Step 7 — Remove the `invokeLater` import everywhere
 
 - After steps 1–5 no file imports `com.intellij.openapi.application.invokeLater`.
-- Add a Detekt / IntelliJ inspection rule (or a CI grep) to fail the build when
-  `invokeLater` reappears in `src/main/kotlin`.
+- Verify with `grep -rn 'invokeLater' src/main/kotlin` — must be empty.
+- Adding a CI grep guard is **out of scope** for this PR; track as a follow-up
+  in `docs/plans/README.md` if desired. The reason it is deferred: this PR
+  already touches 5 files and a CI step is a separate concern that may need
+  team review of failure modes (e.g. tests or generated code that legitimately
+  call `invokeLater`).
 
 ## Service scope (SessionStorage)
 
-`SessionStorage` is already a `@Service(Service.Level.PROJECT)`. The platform supports
-injecting a `CoroutineScope` parameter into the constructor of a `@Service`-annotated
-class; it is created from the parent project scope and cancelled automatically when
-the project is disposed.
+`SessionStorage` is already a `@Service(Service.Level.PROJECT)`. The platform
+supports injecting a `CoroutineScope` parameter into the constructor of a
+`@Service`-annotated class; it is created from the parent project scope and
+cancelled automatically when the project is disposed.
 
 Target shape:
 
@@ -296,7 +463,11 @@ class SessionStorage(
     fun putSession(key: String, s: Session) { sessions[key] = s }
     fun remove(key: String): Session? = sessions.remove(key)?.also { it.job?.cancel() }
 
-    /** Replace any previously stored job and return it so the caller can join. */
+    /**
+     * Atomically store [job] on the session for [key] and return any
+     * previously-stored job so the caller can cancel it.
+     * Returns `null` if the session no longer exists.
+     */
     fun replaceJob(key: String, job: Job): Job? {
         val s = sessions[key] ?: return null
         val prev = s.job
@@ -305,6 +476,18 @@ class SessionStorage(
     }
 }
 ```
+
+Notes:
+- `remove` now also cancels the stored `Job` — but this is a strict superset of
+  current behaviour (`remove` was only called from `delete(key)` which already
+  ran `processHandler?.destroyProcess()`). The `Job.cancel()` triggers the
+  coroutine's `finally` block, which calls `notifyProcessTerminated` exactly
+  once on the HTTP handler and lets `OSProcessHandler` run its normal
+  termination. No double-termination occurs because the handler is idempotent
+  (`AtomicBoolean terminated`).
+- The cross-plan note in step 1 still applies: plan 05 expands this class with
+  per-file lookup helpers and a reaper listener. The `cs` field added here is
+  orthogonal and survives the plan-05 rewrite unchanged.
 
 Cancellation chain:
 
