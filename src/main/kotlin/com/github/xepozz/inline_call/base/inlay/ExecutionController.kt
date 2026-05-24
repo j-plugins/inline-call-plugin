@@ -11,12 +11,22 @@ import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
 import com.intellij.codeInsight.hints.declarative.impl.DeclarativeInlayHintsPassFactory
 import com.intellij.execution.process.ProcessEvent
 import com.intellij.execution.process.ProcessListener
-import com.intellij.openapi.application.invokeLater
+import com.intellij.openapi.application.EDT
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiDocumentManager
+import com.intellij.psi.PsiElement
+import com.intellij.psi.SmartPointerManager
+import com.intellij.psi.SmartPsiElementPointer
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineName
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.awt.BorderLayout
 import javax.swing.JPanel
 
@@ -24,8 +34,8 @@ import javax.swing.JPanel
  * Project-scoped service that performs run / stop / delete / toggle-collapse
  * for inline-call feature matches and refreshes the declarative inlay pass
  * afterwards. Kept independent from any specific inlay provider so the same
- * logic can be reused from [InlayActionHandler] implementations or from
- * future entry points (toolbar action, run configurations, etc.).
+ * logic can be reused from [com.intellij.codeInsight.hints.declarative.InlayActionHandler]
+ * implementations or from future entry points (toolbar action, run configurations, etc.).
  */
 @Service(Service.Level.PROJECT)
 class ExecutionController(private val project: Project) {
@@ -38,61 +48,119 @@ class ExecutionController(private val project: Project) {
         match: FeatureMatch,
         key: String,
         lineEndOffset: Int,
+        virtualFile: VirtualFile?,
+        occurrenceIndex: Int,
+        anchorElement: PsiElement?,
     ) {
         @Suppress("UNCHECKED_CAST")
-        runTyped(editor, feature as FeatureGenerator<Wrapper>, match, key, lineEndOffset)
+        val typedFeature = feature as FeatureGenerator<Wrapper>
+        val newJob = sessionStorage.cs.launch(CoroutineName("inline-call:$key")) {
+            runImpl(editor, typedFeature, match, key, lineEndOffset, virtualFile, occurrenceIndex, anchorElement)
+        }
+        sessionStorage.replaceJob(key, newJob)?.cancel()
     }
 
-    private fun <TWrapper : Wrapper> runTyped(
+    private suspend fun <TWrapper : Wrapper> runImpl(
         editor: Editor,
         feature: FeatureGenerator<TWrapper>,
         match: FeatureMatch,
         key: String,
         lineEndOffset: Int,
+        virtualFile: VirtualFile?,
+        occurrenceIndex: Int,
+        anchorElement: PsiElement?,
     ) {
-        var current = sessionStorage.getSession(key)
         val wrapper = feature.createWrapper()
+        val vfUrl = virtualFile?.url ?: ""
+        val valueHash = SessionStorage.hashValue(match.value)
+        val anchor: SmartPsiElementPointer<PsiElement>? =
+            if (anchorElement != null && anchorElement.isValid)
+                SmartPointerManager.getInstance(project).createSmartPsiElementPointer(anchorElement)
+            else null
 
-        if (current?.container == null) {
-            try {
-                val container = createResultContainer()
-                embedContainerIntoEditor(editor, container, lineEndOffset)
-                mountWrapperIntoContainer(container, wrapper)
+        // Phase 1: ensure container exists and is mounted; replace wrapper.
+        val session = withContext(Dispatchers.EDT) {
+            var current = sessionStorage.getSession(key)
 
-                current = Session(container, wrapper)
-            } catch (_: Throwable) {
-                current = Session(null, wrapper)
-            }
-            sessionStorage.putSession(key, current)
-        } else {
-            val container = current.container
-            val oldWrapper = current.wrapper
-            if (oldWrapper != null) {
-                container.remove(oldWrapper.component)
-            }
-            mountWrapperIntoContainer(container, wrapper)
-            current.wrapper = wrapper
-        }
-        current.state = ExecutionState.RUNNING
+            // Container may be null because (a) never mounted, or (b) the
+            // previous editor was disposed on file close (container exists
+            // but its parent is null — rebuild and re-mount).
+            val needsContainer = current?.container == null || current.container?.parent == null
 
-        refreshInlays(editor)
-
-        val session = current
-        feature.execute(match, wrapper, project) { processHandler ->
-            session.processHandler = processHandler
-
-            processHandler?.addProcessListener(object : ProcessListener {
-                override fun processTerminated(event: ProcessEvent) {
-                    session.state = ExecutionState.FINISHED
-                    session.processHandler = null
-                    refreshInlays(editor)
+            if (needsContainer) {
+                val container = try {
+                    val c = createResultContainer()
+                    embedContainerIntoEditor(editor, c, lineEndOffset)
+                    mountWrapperIntoContainer(c, wrapper)
+                    c
+                } catch (_: Throwable) {
+                    null
                 }
-            })
+                if (current == null) {
+                    current = Session(
+                        virtualFileUrl = vfUrl,
+                        featureId = match.featureId,
+                        valueHash = valueHash,
+                        occurrenceIndex = occurrenceIndex,
+                        anchor = anchor,
+                        container = container,
+                        wrapper = wrapper,
+                    )
+                } else {
+                    current.container = container
+                    current.wrapper = wrapper
+                    if (current.anchor == null) current.anchor = anchor
+                }
+                sessionStorage.putSession(key, current)
+            } else {
+                val container = current!!.container!!
+                val oldWrapper = current.wrapper
+                if (oldWrapper != null) {
+                    container.remove(oldWrapper.component)
+                }
+                mountWrapperIntoContainer(container, wrapper)
+                current.wrapper = wrapper
+                if (current.anchor == null) current.anchor = anchor
+            }
+            current.state = ExecutionState.RUNNING
+            refreshInlaysOnEdt(editor)
+            current
+        }
+
+        // Phase 2: execute. feature.execute manages its own dispatcher hops.
+        val handler = feature.execute(match, wrapper, project)
+        session.processHandler = handler
+
+        if (handler == null) {
+            withContext(NonCancellable + Dispatchers.EDT) {
+                session.state = ExecutionState.FINISHED
+                refreshInlaysOnEdt(editor)
+            }
+            return
+        }
+
+        // Phase 3: bridge ProcessListener -> CompletableDeferred so the
+        // coroutine awaits termination without blocking a thread.
+        val done = CompletableDeferred<Unit>()
+        handler.addProcessListener(object : ProcessListener {
+            override fun processTerminated(event: ProcessEvent) {
+                done.complete(Unit)
+            }
+        })
+        try {
+            done.await()
+        } finally {
+            withContext(NonCancellable + Dispatchers.EDT) {
+                session.processHandler = null
+                session.state = ExecutionState.FINISHED
+                refreshInlaysOnEdt(editor)
+            }
         }
     }
 
     fun stop(editor: Editor, key: String) {
         val session = sessionStorage.getSession(key) ?: return
+        session.job?.cancel()
         session.processHandler?.destroyProcess()
         session.processHandler = null
         session.state = ExecutionState.FINISHED
@@ -103,9 +171,9 @@ class ExecutionController(private val project: Project) {
         val session = sessionStorage.remove(key) ?: return
         try { session.processHandler?.destroyProcess() } catch (_: Throwable) { }
         session.processHandler = null
-        invokeLater {
+        sessionStorage.cs.launch(Dispatchers.EDT) {
             session.container?.parent?.remove(session.container)
-            refreshInlays(editor)
+            refreshInlaysOnEdt(editor)
         }
     }
 
@@ -113,18 +181,17 @@ class ExecutionController(private val project: Project) {
         val session = sessionStorage.getSession(key) ?: return
         session.collapsed = !session.collapsed
         val visible = !session.collapsed
-        invokeLater {
+        sessionStorage.cs.launch(Dispatchers.EDT) {
             session.container?.isVisible = visible
-            refreshInlays(editor)
+            refreshInlaysOnEdt(editor)
         }
     }
 
     private fun mountWrapperIntoContainer(container: JPanel, wrapper: Wrapper) {
-        invokeLater {
-            container.add(wrapper.component, BorderLayout.CENTER)
-            container.revalidate()
-            container.repaint()
-        }
+        // Caller is expected to already be on the EDT.
+        container.add(wrapper.component, BorderLayout.CENTER)
+        container.revalidate()
+        container.repaint()
     }
 
     /**
@@ -136,15 +203,19 @@ class ExecutionController(private val project: Project) {
      * resets the cached stamp; [DaemonCodeAnalyzer.restart] then re-schedules
      * the pass for the affected file.
      */
-    private fun refreshInlays(editor: Editor) {
-        invokeLater {
-            DeclarativeInlayHintsPassFactory.scheduleRecompute(editor, project)
-            val psiFile = PsiDocumentManager.getInstance(project).getPsiFile(editor.document)
-            if (psiFile != null) {
-                DaemonCodeAnalyzer.getInstance(project).restart(psiFile)
-            } else {
-                DaemonCodeAnalyzer.getInstance(project).restart()
-            }
+    fun refreshInlays(editor: Editor) {
+        sessionStorage.cs.launch(Dispatchers.EDT) {
+            refreshInlaysOnEdt(editor)
+        }
+    }
+
+    private fun refreshInlaysOnEdt(editor: Editor) {
+        DeclarativeInlayHintsPassFactory.scheduleRecompute(editor, project)
+        val psiFile = PsiDocumentManager.getInstance(project).getPsiFile(editor.document)
+        if (psiFile != null) {
+            DaemonCodeAnalyzer.getInstance(project).restart(psiFile)
+        } else {
+            DaemonCodeAnalyzer.getInstance(project).restart()
         }
     }
 

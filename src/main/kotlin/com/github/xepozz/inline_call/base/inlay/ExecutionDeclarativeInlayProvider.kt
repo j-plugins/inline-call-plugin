@@ -18,6 +18,7 @@ import com.intellij.codeInsight.hints.declarative.InlineInlayPosition
 import com.intellij.codeInsight.hints.declarative.OwnBypassCollector
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
 
@@ -48,28 +49,63 @@ private class ExecutionDeclarativeCollector(
 
     private val project: Project = file.project
     private val sessionStorage = SessionStorage.getInstance(project)
+    private val virtualFile: VirtualFile? = file.virtualFile
 
     override fun collectHintsForFile(file: PsiFile, sink: InlayTreeSink) {
-        val matches = computeMatches(file).ifEmpty { return }
+        val matchesByElement = computeMatches(file).ifEmpty { return }
 
-        for ((_, matchList) in matches) {
+        // Pre-compute per-(featureId, valueHash) occurrence indices so the
+        // payload carries a stable identity that survives line shifts.
+        val allOrdered = matchesByElement.values.flatten()
+            .sortedBy { it.originalRange.startOffset }
+        val counters = HashMap<Pair<String, String>, Int>()
+        val occurrenceIndex = java.util.IdentityHashMap<FeatureMatch, Int>()
+        for (m in allOrdered) {
+            val groupKey = m.featureId to SessionStorage.hashValue(m.value)
+            val next = counters[groupKey] ?: 0
+            occurrenceIndex[m] = next
+            counters[groupKey] = next + 1
+        }
+
+        // Stale-key sweep: any session for this file whose key no longer
+        // corresponds to a current match is evicted (process terminated,
+        // panel disposed). Done once per inlay pass.
+        virtualFile?.let { vf ->
+            val validKeys = HashSet<String>(occurrenceIndex.size)
+            occurrenceIndex.forEach { (m, occ) ->
+                validKeys += SessionStorage.makeKey(vf, m.featureId, SessionStorage.hashValue(m.value), occ)
+            }
+            val evicted = sessionStorage.evictStale(vf.url, validKeys)
+            evicted.forEach { session ->
+                try { session.processHandler?.destroyProcess() } catch (_: Throwable) {}
+                session.processHandler = null
+            }
+        }
+
+        for ((_, matchList) in matchesByElement) {
             for (m in matchList) {
                 val offset = m.originalRange.startOffset
                 if (offset < 0 || offset > editor.document.textLength) continue
-                emitButtonsForMatch(sink, offset, m)
+                emitButtonsForMatch(sink, offset, m, occurrenceIndex[m] ?: 0)
             }
         }
     }
 
-    private fun emitButtonsForMatch(sink: InlayTreeSink, offset: Int, match: FeatureMatch) {
+    private fun emitButtonsForMatch(
+        sink: InlayTreeSink,
+        offset: Int,
+        match: FeatureMatch,
+        occurrenceIndex: Int,
+    ) {
         val line = editor.document.getLineNumber(offset)
-        val key = makeKey(editor, match.featureId, line)
+        val valueHash = SessionStorage.hashValue(match.value)
+        val key = makeKey(editor, virtualFile, match.featureId, match.value, occurrenceIndex, line)
         val session = sessionStorage.getSession(key)
         val state = session?.state ?: ExecutionState.IDLE
 
         val feature = FeatureGenerator.getApplicable(project).firstOrNull { it.id == match.featureId }
         val tooltipBase = feature?.let { "${it.tooltipPrefix}: ${match.value}" } ?: match.value
-        val payload = ExecutionInlayPayload(match.featureId, line)
+        val payload = ExecutionInlayPayload(match.featureId, valueHash, occurrenceIndex, line)
 
         // Collapse / Expand button appears whenever a container is mounted.
         if (session?.container != null) {

@@ -1,22 +1,38 @@
 package com.github.xepozz.inline_call.base.inlay
 
+import com.github.xepozz.inline_call.base.SessionStorage
 import com.intellij.codeInsight.hints.declarative.InlayActionPayload
 import com.intellij.codeInsight.hints.declarative.StringInlayActionPayload
 import com.intellij.openapi.editor.Editor
+import com.intellij.openapi.vfs.VirtualFile
 
 /**
- * Session key shared by the collector (when it writes) and the action handlers
- * (when they read). Uses `editor.hashCode()` for back-compat with the legacy
- * provider; this is known to be unstable across IDE restarts, but fixing it is
- * tracked separately by plan 05 (session-storage-key).
+ * Compose the SessionStorage key for an action click. Prefers the stable
+ * composite key (see [SessionStorage.makeKey]) when the editor's document
+ * has a backing [VirtualFile]; falls back to a synthetic editor-hash key
+ * for dummy/light files (testing edge cases) so behaviour matches the
+ * pre-plan-05 baseline instead of crashing.
  */
-fun makeKey(editor: Editor, featureId: String, line: Int): String =
-    "${editor.hashCode()}_${featureId}_$line"
+fun makeKey(
+    editor: Editor,
+    file: VirtualFile?,
+    featureId: String,
+    value: String,
+    occurrenceIndex: Int,
+    fallbackLine: Int,
+): String {
+    val hash = SessionStorage.hashValue(value)
+    return if (file != null) {
+        SessionStorage.makeKey(file, featureId, hash, occurrenceIndex)
+    } else {
+        "ed=${editor.hashCode()}::${featureId}::${hash}#L${fallbackLine}"
+    }
+}
 
 /**
  * Payload model carried by the declarative inlay click. Encoded as
- * `featureId|line` because [StringInlayActionPayload] is the only payload
- * type we want to keep small (no Json runtime dep, no PSI pointers).
+ * `featureId|valueHash|occurrenceIndex|line` because [StringInlayActionPayload]
+ * is the only payload type we want to keep small (no JSON runtime dep, no PSI pointers).
  *
  * The action (RUN / STOP / DELETE / TOGGLE_COLLAPSE) is **not** encoded into
  * the payload; it is carried by the [com.intellij.codeInsight.hints.declarative.InlayActionData.handlerId]
@@ -25,9 +41,11 @@ fun makeKey(editor: Editor, featureId: String, line: Int): String =
  */
 internal data class ExecutionInlayPayload(
     val featureId: String,
+    val valueHash: String,
+    val occurrenceIndex: Int,
     val line: Int,
 ) {
-    fun encode(): String = "$featureId|$line"
+    fun encode(): String = "$featureId|$valueHash|$occurrenceIndex|$line"
 
     fun toActionPayload(): InlayActionPayload = StringInlayActionPayload(encode())
 
@@ -36,11 +54,13 @@ internal data class ExecutionInlayPayload(
 
         fun decode(payload: InlayActionPayload): ExecutionInlayPayload? {
             val text = (payload as? StringInlayActionPayload)?.text ?: return null
-            val sep = text.lastIndexOf(SEPARATOR)
-            if (sep <= 0 || sep == text.length - 1) return null
-            val featureId = text.substring(0, sep)
-            val line = text.substring(sep + 1).toIntOrNull() ?: return null
-            return ExecutionInlayPayload(featureId, line)
+            val parts = text.split(SEPARATOR)
+            if (parts.size != 4) return null
+            val featureId = parts[0].ifEmpty { return null }
+            val valueHash = parts[1]
+            val occ = parts[2].toIntOrNull() ?: return null
+            val line = parts[3].toIntOrNull() ?: return null
+            return ExecutionInlayPayload(featureId, valueHash, occ, line)
         }
     }
 }
