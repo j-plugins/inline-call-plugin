@@ -11,9 +11,6 @@ import com.intellij.execution.process.ProcessTerminatedListener
 import com.intellij.execution.ui.ConsoleViewContentType
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.application.invokeLater
-import com.intellij.openapi.progress.ProgressIndicator
-import com.intellij.openapi.progress.ProgressManager
-import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.TextRange
 import java.util.regex.Pattern
@@ -53,47 +50,21 @@ class ShellFeatureAdapter(val project: Project) : FeatureGenerator<ConsoleWrappe
     ) {
         val value = match.value
         val console = wrapper.console
-        // Run with progress indicator similar to HTTP feature
-        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Executing shell command", true) {
-            override fun run(indicator: ProgressIndicator) {
-                indicator.isIndeterminate = true
-                indicator.text = "Running shell command"
-                indicator.text2 = value
 
-                val commandLine = GeneralCommandLine("/bin/sh", "-c", value)
-                    .withRedirectErrorStream(true)
-                val processHandler = OSProcessHandler(commandLine)
-                ProcessTerminatedListener.attach(processHandler)
-                console.attachToProcess(processHandler)
-                onProcessCreated(processHandler)
-
-                try {
-                    processHandler.startNotify()
-
-                    // Keep progress indicator alive until process finishes or user cancels
-                    while (!processHandler.isProcessTerminated) {
-                        if (indicator.isCanceled) {
-                            // User canceled via progress UI; destroy the process
-                            processHandler.destroyProcess()
-                            break
-                        }
-                        // Slight sleep to avoid busy waiting; progress stays visible
-                        try {
-                            Thread.sleep(50)
-                        } catch (_: InterruptedException) {
-                            // If interrupted, attempt to stop process and exit
-                            processHandler.destroyProcess()
-                            break
-                        }
-                    }
-                } catch (e: Exception) {
-                    invokeLater {
-                        onProcessCreated(null)
-                        console.print("\n[Error: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
-                    }
-                }
+        try {
+            val commandLine = GeneralCommandLine("/bin/sh", "-c", value)
+                .withRedirectErrorStream(true)
+            val processHandler = OSProcessHandler(commandLine)
+            ProcessTerminatedListener.attach(processHandler)
+            console.attachToProcess(processHandler)
+            onProcessCreated(processHandler)
+            processHandler.startNotify()
+        } catch (e: Exception) {
+            invokeLater {
+                onProcessCreated(null)
+                console.print("\n[Error: ${e.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
             }
-        })
+        }
     }
 
     override fun createWrapper() = ConsoleWrapperPanel(project)
