@@ -8,7 +8,7 @@ import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.ui.ConsoleView
 import com.intellij.execution.ui.ConsoleViewContentType
 import com.intellij.icons.AllIcons
-import com.intellij.openapi.application.invokeLater
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.TextRange
 import java.net.URI
@@ -22,7 +22,9 @@ import java.util.regex.Pattern
 import javax.swing.Icon
 
 /**
- * Feature adapter that delegates matching and execution to existing HttpExecutionHandler.
+ * HTTP feature adapter. Async via [HttpClient.sendAsync] (no coroutines —
+ * see [com.github.xepozz.inline_call.base.api.FeatureGenerator.execute]
+ * for why the suspend chain was reverted).
  */
 class HttpFeatureAdapter(val project: Project) : FeatureGenerator<HttpWrapperPanel> {
     override val id: String = "http"
@@ -41,7 +43,10 @@ class HttpFeatureAdapter(val project: Project) : FeatureGenerator<HttpWrapperPan
         val base = block.originalRange.startOffset
         return matches.map { m ->
             val startOriginal = base + block.mapping.toOriginal(m.offset)
-            val endOriginal = startOriginal + m.value.length
+            val endOriginal = base + block.mapping.toOriginal(m.offset + m.value.length)
+            assert(endOriginal - startOriginal >= m.value.length) {
+                "endOriginal($endOriginal) - startOriginal($startOriginal) < value.length(${m.value.length})"
+            }
             FeatureMatch(
                 featureId = id,
                 block = block,
@@ -56,12 +61,10 @@ class HttpFeatureAdapter(val project: Project) : FeatureGenerator<HttpWrapperPan
         match: FeatureMatch,
         wrapper: HttpWrapperPanel,
         project: Project,
-        onProcessCreated: (ProcessHandler?) -> Unit
+        onProcessCreated: (ProcessHandler?) -> Unit,
     ) {
         val value = match.value
         val console = wrapper.console
-        val bodyConsole = wrapper.bodyConsole
-        val headersConsole = wrapper.headersConsole
 
         console.print("GET $value\n", ConsoleViewContentType.SYSTEM_OUTPUT)
         console.print("Connecting...\n\n", ConsoleViewContentType.LOG_INFO_OUTPUT)
@@ -79,7 +82,6 @@ class HttpFeatureAdapter(val project: Project) : FeatureGenerator<HttpWrapperPan
             override fun getProcessInput() = null
 
             override fun destroyProcessImpl() {
-                // Cancel ongoing request if any
                 if (terminated.compareAndSet(false, true)) {
                     future?.cancel(true)
                     notifyProcessTerminated(0)
@@ -93,7 +95,6 @@ class HttpFeatureAdapter(val project: Project) : FeatureGenerator<HttpWrapperPan
                 }
             }
 
-            // Expose safe termination method to outer scope
             fun complete(exitCode: Int) {
                 if (terminated.compareAndSet(false, true)) {
                     notifyProcessTerminated(exitCode)
@@ -106,36 +107,28 @@ class HttpFeatureAdapter(val project: Project) : FeatureGenerator<HttpWrapperPan
 
         future = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
             .whenComplete { response, throwable ->
-                console.clear()
                 if (throwable != null) {
-                    invokeLater {
+                    ApplicationManager.getApplication().invokeLater {
                         console.print("[Error: ${throwable.message}]\n", ConsoleViewContentType.ERROR_OUTPUT)
                     }
                     handler.complete(-1)
                 } else if (response != null) {
-                    invokeLater {
-                        printResponse(console, headersConsole, bodyConsole, response)
+                    ApplicationManager.getApplication().invokeLater {
+                        console.clear()
+                        printResponse(console, response)
                     }
                     handler.complete(0)
                 }
             }
     }
 
-    private fun printResponse(
-        console: ConsoleView,
-        headersConsole: ConsoleView,
-        bodyConsole: ConsoleView,
-        response: HttpResponse<String>,
-    ) {
+    private fun printResponse(console: ConsoleView, response: HttpResponse<String>) {
         response.headers().map().entries.take(10).forEach { (k, v) ->
-            headersConsole.print("$k: ${v.firstOrNull()}\n", ConsoleViewContentType.LOG_INFO_OUTPUT)
             console.print("$k: ${v.firstOrNull()}\n", ConsoleViewContentType.LOG_INFO_OUTPUT)
         }
 
         console.print("\n", ConsoleViewContentType.LOG_DEBUG_OUTPUT)
         console.print(response.body(), ConsoleViewContentType.NORMAL_OUTPUT)
-
-        bodyConsole.print(response.body(), ConsoleViewContentType.NORMAL_OUTPUT)
     }
 
     override fun createWrapper() = HttpWrapperPanel(project)

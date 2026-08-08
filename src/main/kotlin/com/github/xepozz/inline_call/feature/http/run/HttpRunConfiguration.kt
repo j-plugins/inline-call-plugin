@@ -9,6 +9,7 @@ import com.intellij.execution.configurations.RunProfileState
 import com.intellij.execution.runners.ExecutionEnvironment
 import com.intellij.openapi.options.SettingsEditor
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.DialogPanel
 import com.intellij.ui.dsl.builder.bindIntText
 import com.intellij.ui.dsl.builder.bindItem
 import com.intellij.ui.dsl.builder.bindText
@@ -52,58 +53,77 @@ class HttpRunConfiguration(
         HttpRunState(this, environment)
 }
 
-class HttpSettingsEditor : com.intellij.openapi.options.SettingsEditor<HttpRunConfiguration>() {
+/**
+ * Mutable snapshot the Kotlin UI DSL binds against. Translated to/from
+ * [HttpRunConfiguration] in [HttpSettingsEditor.applyEditorTo] /
+ * [HttpSettingsEditor.resetEditorFrom].
+ */
+private data class HttpUiModel(
+    var url: String = "",
+    var method: String = "GET",
+    var headers: String = "",
+    var body: String = "",
+    var timeout: Int = 30,
+)
 
-    private var url = ""
-    private var method = "GET"
-    private var headers = ""
-    private var body = ""
-    private var timeout = 30
+class HttpSettingsEditor : SettingsEditor<HttpRunConfiguration>() {
+
+    private val model = HttpUiModel()
+    private lateinit var panel: DialogPanel
 
     private val methods = listOf("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
 
-    override fun createEditor(): JComponent = panel {
-        row("Method:") {
-            comboBox(methods)
-                .bindItem({ method }, { method = it ?: "GET" })
+    override fun createEditor(): JComponent {
+        panel = panel {
+            row("Method:") {
+                comboBox(methods)
+                    .bindItem({ model.method }, { model.method = it ?: "GET" })
+            }
+            row("URL:") {
+                textField()
+                    .resizableColumn()
+                    .bindText(model::url)
+            }
+            row("Timeout (sec):") {
+                intTextField(1..300)
+                    .bindIntText(model::timeout)
+            }
+            row("Headers:") {
+                textArea()
+                    .rows(3)
+                    .resizableColumn()
+                    .bindText(model::headers)
+                    .comment("Format: Header-Name: value (one per line)")
+            }
+            row("Body:") {
+                textArea()
+                    .rows(5)
+                    .resizableColumn()
+                    .bindText(model::body)
+            }
         }
-        row("URL:") {
-            textField()
-                .resizableColumn()
-                .bindText(::url)
-        }
-        row("Timeout (sec):") {
-            intTextField(1..300)
-                .bindIntText(::timeout)
-        }
-        row("Headers:") {
-            textArea()
-                .rows(3)
-                .resizableColumn()
-                .bindText(::headers)
-                .comment("Format: Header-Name: value (one per line)")
-        }
-        row("Body:") {
-            textArea()
-                .rows(5)
-                .resizableColumn()
-                .bindText(::body)
-        }
+        return panel
     }
 
     override fun applyEditorTo(s: HttpRunConfiguration) {
-        s.url = url
-        s.method = method
-        s.headers = headers
-        s.body = body
-        s.timeout = timeout
+        // Flush UI -> model first, then copy model -> options.
+        panel.apply()
+        s.url = model.url
+        s.method = model.method
+        s.headers = model.headers
+        s.body = model.body
+        s.timeout = model.timeout
     }
 
     override fun resetEditorFrom(s: HttpRunConfiguration) {
-        url = s.url
-        method = s.method
-        headers = s.headers
-        body = s.body
-        timeout = s.timeout
+        // Copy options -> model first, then refresh UI from model.
+        model.url = s.url
+        model.method = s.method
+        model.headers = s.headers
+        model.body = s.body
+        model.timeout = s.timeout
+        if (::panel.isInitialized) {
+            panel.reset()
+        }
     }
 }

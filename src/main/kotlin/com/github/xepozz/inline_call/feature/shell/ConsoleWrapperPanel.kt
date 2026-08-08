@@ -3,6 +3,7 @@ package com.github.xepozz.inline_call.feature.shell
 import com.github.xepozz.inline_call.base.api.Wrapper
 import com.github.xepozz.inline_call.base.inlay.ui.createToolbar
 import com.intellij.execution.filters.TextConsoleBuilderFactory
+import com.intellij.execution.impl.ConsoleViewImpl
 import com.intellij.execution.ui.ConsoleView
 import com.intellij.openapi.project.Project
 import java.awt.BorderLayout
@@ -16,7 +17,7 @@ class ConsoleWrapperPanel(project: Project) : Wrapper {
     val console: ConsoleView = builder.console
 
 
-    val toolbar = createToolbar()
+    val toolbar = createToolbar { (console as? ConsoleViewImpl)?.editor?.document?.text.orEmpty() }
     val toolbarWrapper = JPanel(FlowLayout(FlowLayout.RIGHT, 5, 5)).apply {
         isOpaque = false
         alignmentX = 1.0f
